@@ -10,7 +10,7 @@ from ppo.algorithms.utils.transformer_act import discrete_parallel_act
 from ppo.algorithms.utils.transformer_act import continuous_autoregreesive_act
 from ppo.algorithms.utils.transformer_act import continuous_parallel_act
 from ppo.algorithms.utils.transformer_act import continuous_moe_act, continuous_moe_eval
-from ppo.algorithms.ppo.flow_gae import ValueFlowCritic, make_standard_normal_particles
+from ppo.algorithms.ppo.flow_gae import FlowFieldValueCritic, ValueFlowCritic, make_standard_normal_particles
 
 
 def init_(m, gain=0.01, activate=False):
@@ -84,7 +84,18 @@ class Actor(nn.Module):
 
 class PPO(nn.Module):
 
-    def __init__(self, obs_shape, action_dim, n_embd, device=torch.device("cpu"), action_type='Discrete', num_quants=1, critic_type="flow"):
+    def __init__(
+        self,
+        obs_shape,
+        action_dim,
+        n_embd,
+        device=torch.device("cpu"),
+        action_type='Discrete',
+        num_quants=1,
+        critic_type="direct",
+        num_flow_steps=8,
+        flow_integrator="euler",
+    ):
         super(PPO, self).__init__()
 
         self.action_dim = action_dim
@@ -94,11 +105,19 @@ class PPO(nn.Module):
         self.n_embd = n_embd
         self.obs_shape = obs_shape
         self.num_quants = num_quants
-        self.critic_type = critic_type
+        self.critic_type = "direct" if critic_type == "flow" else critic_type
    
         # Actor-Critic Networks
-        if self.critic_type == "flow":
+        if self.critic_type == "direct":
             self.critic = ValueFlowCritic(obs_shape, hidden_dim=n_embd)
+            self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
+        elif self.critic_type == "flow_field":
+            self.critic = FlowFieldValueCritic(
+                obs_shape,
+                hidden_dim=n_embd,
+                num_flow_steps=num_flow_steps,
+                integrator=flow_integrator,
+            )
             self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
         elif self.critic_type == "legacy":
             self.critic = Critic(obs_shape, n_embd, device, num_quants)
@@ -116,7 +135,7 @@ class PPO(nn.Module):
             self.actor.zero_std(self.device)
 
     def critic_values(self, obs):
-        if self.critic_type == "flow":
+        if self.critic_type in {"direct", "flow_field"}:
             return self.critic(obs, self.critic_particles)
         return self.critic(obs)
 

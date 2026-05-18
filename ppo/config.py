@@ -285,10 +285,15 @@ def get_config():
     parser.add_argument("--eval_maps", type=str, nargs='+', default=None)
 
     # add for distributional citic
-    parser.add_argument("--critic_type", type=str, default="flow",
-                        choices=["flow", "legacy"],
-                        help="critic implementation: flow uses ValueFlowCritic, legacy uses the original MLP critic")
+    parser.add_argument("--critic_type", type=str, default="direct",
+                        choices=["direct", "flow_field", "legacy", "flow"],
+                        help="critic implementation: direct uses the MLP transport map, flow_field uses an ODE vector field, legacy uses the original MLP critic; flow is an alias for direct")
     parser.add_argument("--num_quants", type=int, default=64)
+    parser.add_argument("--num_flow_steps", type=int, default=8,
+                        help="number of integration steps for critic_type=flow_field")
+    parser.add_argument("--flow_integrator", type=str, default="euler",
+                        choices=["euler", "rk4"],
+                        help="ODE integrator for critic_type=flow_field")
     parser.add_argument("--flow_weight_mode", type=str, default="uniform",
                         choices=["uniform", "lower_tail", "upper_tail", "smooth_lower_tail", "smooth_upper_tail"],
                         help="spectral quantile weighting mode for flow GAE")

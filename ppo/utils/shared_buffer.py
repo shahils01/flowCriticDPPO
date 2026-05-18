@@ -39,7 +39,9 @@ class SharedReplayBuffer(object):
         self._use_proper_time_limits = args.use_proper_time_limits
         self.algo = args.algorithm_name
         self.env_name = env_name
-        self.critic_type = getattr(args, "critic_type", "flow")
+        self.critic_type = getattr(args, "critic_type", "direct")
+        if self.critic_type == "flow":
+            self.critic_type = "direct"
         self.use_legacy_scalar_gae = (
             getattr(args, "use_legacy_scalar_gae", False)
             or self.critic_type == "legacy"
@@ -158,7 +160,7 @@ class SharedReplayBuffer(object):
         :param value_normalizer: (PopArt) If not None, PopArt value normalizer instance.
         """
         self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
-        if self.critic_type == "flow":
+        if self.critic_type in {"direct", "flow_field"}:
             self.compute_flow_returns(value_normalizer)
             return
 

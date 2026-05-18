@@ -15,7 +15,7 @@ class Discrete:
         self.n = n
 
 
-def _make_args(critic_type="flow", use_legacy_scalar_gae=False, num_quants=1):
+def _make_args(critic_type="direct", use_legacy_scalar_gae=False, num_quants=1):
     return SimpleNamespace(
         episode_length=3,
         n_rollout_threads=1,
@@ -39,7 +39,7 @@ def _make_args(critic_type="flow", use_legacy_scalar_gae=False, num_quants=1):
     )
 
 
-def _make_buffer(critic_type="flow", use_legacy_scalar_gae=False, num_quants=1):
+def _make_buffer(critic_type="direct", use_legacy_scalar_gae=False, num_quants=1):
     return SharedReplayBuffer(
         args=_make_args(
             critic_type=critic_type,
@@ -52,8 +52,25 @@ def _make_buffer(critic_type="flow", use_legacy_scalar_gae=False, num_quants=1):
     )
 
 
-def test_flow_critic_compute_returns_uses_flow_gae_and_bellman_targets():
+def test_direct_critic_compute_returns_uses_flow_gae_and_bellman_targets():
     buffer = _make_buffer()
+    buffer.rewards[:] = np.array([[[[0.0]]], [[[0.0]]], [[[0.0]]]], dtype=np.float32)
+    buffer.value_preds[:-1] = 0.0
+
+    buffer.compute_returns(next_value=np.array([[3.0]], dtype=np.float32))
+
+    deltas = np.array([0.0, 0.0, 1.5], dtype=np.float32)
+    expected = np.empty((3, 1, 1, 1), dtype=np.float32)
+    expected[2] = deltas[2]
+    expected[1] = deltas[1] + 0.5 * 0.5 * expected[2]
+    expected[0] = deltas[0] + 0.5 * 0.5 * expected[1]
+
+    np.testing.assert_allclose(buffer.advantages, expected)
+    np.testing.assert_allclose(buffer.returns[:-1], deltas.reshape(3, 1, 1, 1))
+
+
+def test_flow_field_critic_compute_returns_uses_flow_gae_and_bellman_targets():
+    buffer = _make_buffer(critic_type="flow_field")
     buffer.rewards[:] = np.array([[[[0.0]]], [[[0.0]]], [[[0.0]]]], dtype=np.float32)
     buffer.value_preds[:-1] = 0.0
 

@@ -51,7 +51,7 @@ class PPO_Policy:
         
         self.obs_dim_ = self.obs_dim
         self.num_quants = num_quants
-        self.critic_type = getattr(args, "critic_type", "flow")
+        self.critic_type = getattr(args, "critic_type", "direct")
 
         self.transformer = PPO(self.obs_dim, 
                                self.act_dim,
@@ -59,7 +59,9 @@ class PPO_Policy:
                                device=device,
                                action_type=self.action_type,
                                num_quants=num_quants,
-                               critic_type=self.critic_type)
+                               critic_type=self.critic_type,
+                               num_flow_steps=getattr(args, "num_flow_steps", 8),
+                               flow_integrator=getattr(args, "flow_integrator", "euler"))
 
         self.optimizer = torch.optim.Adam(self.transformer.parameters(),
                                           lr=self.lr, eps=self.opti_eps,

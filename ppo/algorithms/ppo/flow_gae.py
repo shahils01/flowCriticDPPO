@@ -48,33 +48,116 @@ class ValueFlowCritic(nn.Module):
         Returns:
             Return particles with shape (..., num_particles).
         """
-        states, z = self._align_states_and_particles(states, z)
+        states, z = _align_states_and_particles(states, z, self.state_dim, self.z_dim)
         features = torch.cat([states, z], dim=-1)
         return self.net(features).squeeze(-1)
 
     def _align_states_and_particles(self, states, z):
-        if states.shape[-1] != self.state_dim:
-            raise ValueError(
-                f"Expected states last dim {self.state_dim}, got {states.shape[-1]}"
-            )
+        return _align_states_and_particles(states, z, self.state_dim, self.z_dim)
 
-        batch_shape = states.shape[:-1]
 
-        if z.dim() == 1:
-            z = z.view(*([1] * len(batch_shape)), z.shape[0], 1)
-            z = z.expand(*batch_shape, z.shape[-2], self.z_dim)
-        elif (
-            z.dim() >= 2
-            and z.shape[-1] == self.z_dim
-            and not _is_broadcastable_to(z.shape[:-1], batch_shape)
-        ):
-            z = z.expand(*batch_shape, z.shape[-2], self.z_dim)
-        else:
-            z = z.unsqueeze(-1)
-            z = z.expand(*batch_shape, z.shape[-2], self.z_dim)
+class FlowVectorField(nn.Module):
+    """State-conditioned vector field v_phi(s, x_tau, tau)."""
 
-        states = states.unsqueeze(-2).expand(*batch_shape, z.shape[-2], self.state_dim)
-        return states, z
+    def __init__(self, state_dim, hidden_dim=128, z_dim=1, num_layers=2):
+        super().__init__()
+        if num_layers < 1:
+            raise ValueError("num_layers must be at least 1")
+
+        self.state_dim = state_dim
+        self.z_dim = z_dim
+
+        layers = []
+        input_dim = state_dim + z_dim + 1
+        for layer_idx in range(num_layers):
+            in_dim = input_dim if layer_idx == 0 else hidden_dim
+            layers.extend([nn.Linear(in_dim, hidden_dim), nn.GELU()])
+        layers.append(nn.Linear(hidden_dim, z_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, states, x, tau):
+        tau = torch.as_tensor(tau, dtype=x.dtype, device=x.device)
+        tau = tau.expand_as(x[..., :1])
+        features = torch.cat([states, x, tau], dim=-1)
+        return self.net(features)
+
+
+class FlowFieldValueCritic(nn.Module):
+    """
+    Continuous-time value flow critic.
+
+    Particles evolve from z_0 ~ N(0, 1) through:
+        d x_tau / d tau = v_phi(s, x_tau, tau), tau in [0, 1].
+    """
+
+    def __init__(
+        self,
+        state_dim,
+        hidden_dim=128,
+        z_dim=1,
+        num_layers=2,
+        num_flow_steps=8,
+        integrator="euler",
+    ):
+        super().__init__()
+        if num_flow_steps < 1:
+            raise ValueError("num_flow_steps must be at least 1")
+        if integrator not in {"euler", "rk4"}:
+            raise ValueError("integrator must be either 'euler' or 'rk4'")
+
+        self.state_dim = state_dim
+        self.z_dim = z_dim
+        self.num_flow_steps = num_flow_steps
+        self.integrator = integrator
+        self.vector_field = FlowVectorField(
+            state_dim=state_dim,
+            hidden_dim=hidden_dim,
+            z_dim=z_dim,
+            num_layers=num_layers,
+        )
+
+    def forward(self, states, z):
+        states, x = _align_states_and_particles(states, z, self.state_dim, self.z_dim)
+        dt = 1.0 / self.num_flow_steps
+
+        for step in range(self.num_flow_steps):
+            tau = step * dt
+            if self.integrator == "euler":
+                x = x + dt * self.vector_field(states, x, tau)
+            else:
+                x = self._rk4_step(states, x, tau, dt)
+
+        return x.squeeze(-1)
+
+    def _rk4_step(self, states, x, tau, dt):
+        k1 = self.vector_field(states, x, tau)
+        k2 = self.vector_field(states, x + 0.5 * dt * k1, tau + 0.5 * dt)
+        k3 = self.vector_field(states, x + 0.5 * dt * k2, tau + 0.5 * dt)
+        k4 = self.vector_field(states, x + dt * k3, tau + dt)
+        return x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+def _align_states_and_particles(states, z, state_dim, z_dim):
+    if states.shape[-1] != state_dim:
+        raise ValueError(f"Expected states last dim {state_dim}, got {states.shape[-1]}")
+
+    batch_shape = states.shape[:-1]
+
+    if z.dim() == 1:
+        z = z.view(*([1] * len(batch_shape)), z.shape[0], 1)
+        z = z.expand(*batch_shape, z.shape[-2], z_dim)
+    elif (
+        z.dim() >= 2
+        and z.shape[-1] == z_dim
+        and not _is_broadcastable_to(z.shape[:-1], batch_shape)
+    ):
+        z = z.expand(*batch_shape, z.shape[-2], z_dim)
+    else:
+        z = z.unsqueeze(-1)
+        z = z.expand(*batch_shape, z.shape[-2], z_dim)
+
+    states = states.unsqueeze(-2).expand(*batch_shape, z.shape[-2], state_dim)
+    return states, z
 
 
 def normal_cdf(z):
