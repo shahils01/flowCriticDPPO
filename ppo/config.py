@@ -234,6 +234,8 @@ def get_config():
                         help='max norm of gradients (default: 0.5)')
     parser.add_argument("--use_gae", action='store_false',
                         default=True, help='use generalized advantage estimation')
+    parser.add_argument("--use_legacy_scalar_gae", action='store_true',
+                        default=False, help='use the previous scalar GAE implementation instead of flow GAE when num_quants=1')
     parser.add_argument("--gamma", type=float, default=0.98,
                         help='discount factor for rewards (default: 0.99)')
     parser.add_argument("--gae_lambda", type=float, default=0.92,
@@ -283,13 +285,19 @@ def get_config():
     parser.add_argument("--eval_maps", type=str, nargs='+', default=None)
 
     # add for distributional citic
+    parser.add_argument("--critic_type", type=str, default="flow",
+                        choices=["flow", "legacy"],
+                        help="critic implementation: flow uses ValueFlowCritic, legacy uses the original MLP critic")
     parser.add_argument("--num_quants", type=int, default=64)
+    parser.add_argument("--flow_weight_mode", type=str, default="uniform",
+                        choices=["uniform", "lower_tail", "upper_tail", "smooth_lower_tail", "smooth_upper_tail"],
+                        help="spectral quantile weighting mode for flow GAE")
+    parser.add_argument("--flow_alpha", type=float, default=0.1,
+                        help="tail mass for lower_tail and upper_tail flow weighting")
+    parser.add_argument("--flow_eta", type=float, default=1.0,
+                        help="temperature for smooth flow quantile weighting")
     parser.add_argument("--use_value_entropy", action='store_true', default=False)
     parser.add_argument("--true_integration", action='store_true', default=False)
     parser.add_argument("--dgae_epsilon", type=float, default=1.0, help=" coefficience of entropy term in Wasserstein-like directional metric.")
-    
-    # add for MoE GMM Policy
-    parser.add_argument("--moe_policy", action='store_true', default=False)
-    parser.add_argument("--num_experts", type=int, default=3)
 
     return parser

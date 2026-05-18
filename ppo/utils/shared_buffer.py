@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+from ppo.algorithms.ppo.flow_gae import compute_flow_gae, make_standard_normal_particles
 from ppo.utils.util import get_shape_from_obs_space, get_shape_from_act_space
 
 
@@ -38,7 +39,15 @@ class SharedReplayBuffer(object):
         self._use_proper_time_limits = args.use_proper_time_limits
         self.algo = args.algorithm_name
         self.env_name = env_name
+        self.critic_type = getattr(args, "critic_type", "flow")
+        self.use_legacy_scalar_gae = (
+            getattr(args, "use_legacy_scalar_gae", False)
+            or self.critic_type == "legacy"
+        )
         self.num_quants = args.num_quants
+        self.flow_weight_mode = getattr(args, "flow_weight_mode", "uniform")
+        self.flow_alpha = getattr(args, "flow_alpha", 0.1)
+        self.flow_eta = getattr(args, "flow_eta", 1.0)
         self.dgae_epsilon = args.dgae_epsilon
         self.use_value_entropy = args.use_value_entropy
         self.true_integration = args.true_integration
@@ -149,6 +158,14 @@ class SharedReplayBuffer(object):
         :param value_normalizer: (PopArt) If not None, PopArt value normalizer instance.
         """
         self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
+        if self.critic_type == "flow":
+            self.compute_flow_returns(value_normalizer)
+            return
+
+        if self.num_quants == 1 and not self.use_legacy_scalar_gae:
+            self.compute_scalar_flow_gae_returns(value_normalizer)
+            return
+
         gae = 0
         for step in reversed(range(self.rewards.shape[0])):
             if self._use_popart or self._use_valuenorm:
@@ -176,6 +193,54 @@ class SharedReplayBuffer(object):
 
                 self.advantages[step] = (gae - gae.mean()) / (gae.std() + 1e-8) #gae
                 self.returns[step] = gae + self.value_preds[step]
+
+    def get_denormalized_value_particles(self, value_normalizer=None):
+        if self._use_popart or self._use_valuenorm:
+            return value_normalizer.denormalize(self.value_preds)
+        return self.value_preds
+
+    def compute_flow_returns(self, value_normalizer=None):
+        value_particles = self.get_denormalized_value_particles(value_normalizer)
+        current_particles = value_particles[:-1]
+        next_particles = value_particles[1:]
+        masks = self.masks[1:]
+
+        z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
+        advantages = compute_flow_gae(
+            rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
+            current_particles=torch.as_tensor(current_particles, dtype=torch.float32),
+            next_particles=torch.as_tensor(next_particles, dtype=torch.float32),
+            z=z,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            masks=torch.as_tensor(masks, dtype=torch.float32),
+            mode=self.flow_weight_mode,
+            alpha=self.flow_alpha,
+            eta=self.flow_eta,
+        ).detach().cpu().numpy()
+
+        self.advantages[:] = advantages
+        self.returns[:-1] = self.rewards + self.gamma * masks * next_particles
+
+    def compute_scalar_flow_gae_returns(self, value_normalizer=None):
+        value_particles = self.get_denormalized_value_particles(value_normalizer)
+        current_particles = value_particles[:-1]
+        next_particles = value_particles[1:]
+
+        z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
+        advantages = compute_flow_gae(
+            rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
+            current_particles=torch.as_tensor(current_particles, dtype=torch.float32),
+            next_particles=torch.as_tensor(next_particles, dtype=torch.float32),
+            z=z,
+            gamma=self.gamma,
+            gae_lambda=self.gae_lambda,
+            masks=torch.as_tensor(self.masks[1:], dtype=torch.float32),
+            mode="uniform",
+        ).detach().cpu().numpy()
+
+        self.advantages[:] = advantages
+        self.returns[:-1] = advantages + current_particles
 
     def wasserstein_like_distance(self, icdf1, icdf2, step):
         """

@@ -13,8 +13,8 @@ python train/train_mujoco.py \
  --scenario ${scenario} \
  --use_value_entropy True \
  --true_integration True \
- --critic_lr 3e-5 \
- --lr 3e-5 \
+ --critic_lr 3e-4 \
+ --lr 3e-4 \
  --entropy_coef 0.01 \
  --gamma 0.99 \
  --gae_lambda 0.95 \
@@ -23,18 +23,18 @@ python train/train_mujoco.py \
  --n_training_threads 32 \
  --n_rollout_threads 64 \
  --num_mini_batch 1 \
- --episode_length 500 \
+ --episode_length 2048 \
  --eval_interval 25 \
  --num_env_steps 200000000 \
  --ppo_epoch 20 \
- --clip_param 0.1 \
+ --clip_param 0.2 \
  --use_eval \
  --add_center_xy \
  --use_state_agent \
  --use_value_active_masks \
  --use_policy_active_masks \
  --num_quants 64 \
- --use_wandb True \
- --wandb_name "xxx" \
- --user_name "shahil-shaik7-clemson-university" \
+#  --use_wandb True \
+#  --wandb_name "xxx" \
+#  --user_name "shahil-shaik7-clemson-university" \
 #  --moe_policy True

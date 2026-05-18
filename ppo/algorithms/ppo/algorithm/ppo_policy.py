@@ -51,16 +51,15 @@ class PPO_Policy:
         
         self.obs_dim_ = self.obs_dim
         self.num_quants = num_quants
+        self.critic_type = getattr(args, "critic_type", "flow")
 
-        self.transformer = PPO(self.obs_shape, 
+        self.transformer = PPO(self.obs_dim, 
                                self.act_dim,
                                n_embd=args.n_embd,
-                               moe_policy=args.moe_policy,
                                device=device,
                                action_type=self.action_type,
-                               num_experts=args.num_experts,
                                num_quants=num_quants,
-                               terrain_map_shape=getattr(args, "terrain_map_shape", None))
+                               critic_type=self.critic_type)
 
         self.optimizer = torch.optim.Adam(self.transformer.parameters(),
                                           lr=self.lr, eps=self.opti_eps,
