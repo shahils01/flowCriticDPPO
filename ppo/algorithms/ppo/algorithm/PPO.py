@@ -95,6 +95,9 @@ class PPO(nn.Module):
         critic_type="direct",
         num_flow_steps=8,
         flow_integrator="euler",
+        flow_particle_scale=0.05,
+        flow_max_particle_scale=2.0,
+        flow_max_velocity=5.0,
     ):
         super(PPO, self).__init__()
 
@@ -117,6 +120,9 @@ class PPO(nn.Module):
                 hidden_dim=n_embd,
                 num_flow_steps=num_flow_steps,
                 integrator=flow_integrator,
+                particle_scale=flow_particle_scale,
+                max_particle_scale=flow_max_particle_scale,
+                max_velocity=flow_max_velocity,
             )
             self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
         elif self.critic_type == "legacy":

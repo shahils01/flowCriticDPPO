@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn  # Already likely imported, but ensure it exists
 from torch.nn.parallel import DataParallel  # Explicit import for clarity
 import numpy as np
-from ppo.utils.util import update_linear_schedule
 from ppo.utils.util import get_shape_from_obs_space, get_shape_from_act_space
 from ppo.algorithms.utils.util import check
 from ppo.algorithms.ppo.algorithm.PPO import PPO
@@ -22,6 +21,7 @@ class PPO_Policy:
         self.device = device
         self.algorithm_name = args.algorithm_name
         self.lr = args.lr
+        self.critic_lr = getattr(args, "critic_lr", args.lr)
         self.opti_eps = args.opti_eps
         self.weight_decay = args.weight_decay
         self._use_policy_active_masks = args.use_policy_active_masks
@@ -61,11 +61,27 @@ class PPO_Policy:
                                num_quants=num_quants,
                                critic_type=self.critic_type,
                                num_flow_steps=getattr(args, "num_flow_steps", 8),
-                               flow_integrator=getattr(args, "flow_integrator", "euler"))
+                               flow_integrator=getattr(args, "flow_integrator", "euler"),
+                               flow_particle_scale=getattr(args, "flow_particle_scale", 0.05),
+                               flow_max_particle_scale=getattr(args, "flow_max_particle_scale", 2.0),
+                               flow_max_velocity=getattr(args, "flow_max_velocity", 5.0))
 
-        self.optimizer = torch.optim.Adam(self.transformer.parameters(),
-                                          lr=self.lr, eps=self.opti_eps,
-                                          weight_decay=self.weight_decay)
+        self.optimizer = torch.optim.Adam(
+            [
+                {
+                    "params": self.transformer.actor.parameters(),
+                    "lr": self.lr,
+                    "initial_lr": self.lr,
+                },
+                {
+                    "params": self.transformer.critic.parameters(),
+                    "lr": self.critic_lr,
+                    "initial_lr": self.critic_lr,
+                },
+            ],
+            eps=self.opti_eps,
+            weight_decay=self.weight_decay,
+        )
 
     def lr_decay(self, episode, episodes):
         """
@@ -73,7 +89,9 @@ class PPO_Policy:
         :param episode: (int) current training episode.
         :param episodes: (int) total number of training episodes.
         """
-        update_linear_schedule(self.optimizer, episode, episodes, self.lr)
+        frac = 1.0 - (episode / float(episodes))
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = param_group["initial_lr"] * frac
 
     def get_actions(self, obs, masks):
         """

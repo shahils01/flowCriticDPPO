@@ -82,7 +82,8 @@ class PPOTrainer:
 
         # if self._use_value_active_masks and not self.dec_actor:
         if self._use_value_active_masks:
-            value_loss = (value_loss * active_masks_batch).sum() / active_masks_batch.sum()
+            value_mask = active_masks_batch.expand_as(value_loss)
+            value_loss = (value_loss * value_mask).sum() / value_mask.sum().clamp_min(1.0)
         else:
             value_loss = value_loss.mean()
 

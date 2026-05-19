@@ -294,6 +294,12 @@ def get_config():
     parser.add_argument("--flow_integrator", type=str, default="euler",
                         choices=["euler", "rk4"],
                         help="ODE integrator for critic_type=flow_field")
+    parser.add_argument("--flow_particle_scale", type=float, default=0.05,
+                        help="initial particle scale for critic_type=flow_field")
+    parser.add_argument("--flow_max_particle_scale", type=float, default=2.0,
+                        help="maximum learned particle scale for critic_type=flow_field")
+    parser.add_argument("--flow_max_velocity", type=float, default=5.0,
+                        help="tanh-clipped vector-field velocity bound for critic_type=flow_field")
     parser.add_argument("--flow_weight_mode", type=str, default="uniform",
                         choices=["uniform", "lower_tail", "upper_tail", "smooth_lower_tail", "smooth_upper_tail"],
                         help="spectral quantile weighting mode for flow GAE")

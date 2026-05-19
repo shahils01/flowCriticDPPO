@@ -2,6 +2,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def make_standard_normal_particles(num_particles, device=None):
@@ -56,16 +57,41 @@ class ValueFlowCritic(nn.Module):
         return _align_states_and_particles(states, z, self.state_dim, self.z_dim)
 
 
+def _init_last_linear(module, weight_std=0.0):
+    for layer in reversed(module):
+        if isinstance(layer, nn.Linear):
+            if weight_std == 0.0:
+                nn.init.zeros_(layer.weight)
+            else:
+                nn.init.normal_(layer.weight, mean=0.0, std=weight_std)
+            nn.init.zeros_(layer.bias)
+            return
+
+
+def _inverse_softplus(value):
+    value = torch.as_tensor(value, dtype=torch.float32)
+    return torch.log(torch.expm1(value).clamp_min(1e-12))
+
+
 class FlowVectorField(nn.Module):
     """State-conditioned vector field v_phi(s, x_tau, tau)."""
 
-    def __init__(self, state_dim, hidden_dim=128, z_dim=1, num_layers=2):
+    def __init__(
+        self,
+        state_dim,
+        hidden_dim=128,
+        z_dim=1,
+        num_layers=2,
+        max_velocity=5.0,
+        zero_init_output=True,
+    ):
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
 
         self.state_dim = state_dim
         self.z_dim = z_dim
+        self.max_velocity = max_velocity
 
         layers = []
         input_dim = state_dim + z_dim + 1
@@ -74,12 +100,17 @@ class FlowVectorField(nn.Module):
             layers.extend([nn.Linear(in_dim, hidden_dim), nn.GELU()])
         layers.append(nn.Linear(hidden_dim, z_dim))
         self.net = nn.Sequential(*layers)
+        if zero_init_output:
+            _init_last_linear(self.net)
 
     def forward(self, states, x, tau):
         tau = torch.as_tensor(tau, dtype=x.dtype, device=x.device)
         tau = tau.expand_as(x[..., :1])
         features = torch.cat([states, x, tau], dim=-1)
-        return self.net(features)
+        velocity = self.net(features)
+        if self.max_velocity is not None:
+            velocity = self.max_velocity * torch.tanh(velocity / self.max_velocity)
+        return velocity
 
 
 class FlowFieldValueCritic(nn.Module):
@@ -98,25 +129,51 @@ class FlowFieldValueCritic(nn.Module):
         num_layers=2,
         num_flow_steps=8,
         integrator="euler",
+        particle_scale=0.05,
+        learn_particle_scale=True,
+        max_particle_scale=2.0,
+        max_velocity=5.0,
     ):
         super().__init__()
         if num_flow_steps < 1:
             raise ValueError("num_flow_steps must be at least 1")
         if integrator not in {"euler", "rk4"}:
             raise ValueError("integrator must be either 'euler' or 'rk4'")
+        if particle_scale <= 0.0:
+            raise ValueError("particle_scale must be positive")
+        if max_particle_scale is not None and max_particle_scale <= 0.0:
+            raise ValueError("max_particle_scale must be positive or None")
 
         self.state_dim = state_dim
         self.z_dim = z_dim
         self.num_flow_steps = num_flow_steps
         self.integrator = integrator
+        self.learn_particle_scale = learn_particle_scale
+        self.max_particle_scale = max_particle_scale
         self.vector_field = FlowVectorField(
             state_dim=state_dim,
             hidden_dim=hidden_dim,
             z_dim=z_dim,
             num_layers=num_layers,
+            max_velocity=max_velocity,
         )
+        self.base_head = nn.Sequential(
+            nn.LayerNorm(state_dim),
+            nn.Linear(state_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        _init_last_linear(self.base_head)
+
+        if learn_particle_scale:
+            self.raw_particle_scale = nn.Parameter(_inverse_softplus(particle_scale))
+        else:
+            self.register_buffer(
+                "fixed_particle_scale", torch.tensor(float(particle_scale))
+            )
 
     def forward(self, states, z):
+        base_value = self.base_head(states)
         states, x = _align_states_and_particles(states, z, self.state_dim, self.z_dim)
         dt = 1.0 / self.num_flow_steps
 
@@ -127,7 +184,16 @@ class FlowFieldValueCritic(nn.Module):
             else:
                 x = self._rk4_step(states, x, tau, dt)
 
-        return x.squeeze(-1)
+        scale = self._particle_scale(dtype=x.dtype, device=x.device)
+        return base_value + scale * x.squeeze(-1)
+
+    def _particle_scale(self, dtype, device):
+        if self.learn_particle_scale:
+            scale = F.softplus(self.raw_particle_scale).to(dtype=dtype, device=device)
+            if self.max_particle_scale is not None:
+                scale = scale.clamp(max=self.max_particle_scale)
+            return scale
+        return self.fixed_particle_scale.to(dtype=dtype, device=device)
 
     def _rk4_step(self, states, x, tau, dt):
         k1 = self.vector_field(states, x, tau)

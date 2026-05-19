@@ -1,6 +1,7 @@
 import torch
 
 from ppo.algorithms.ppo.flow_gae import (
+    FlowFieldValueCritic,
     ValueFlowCritic,
     compute_flow_gae,
     normal_cdf,
@@ -57,6 +58,22 @@ def test_value_flow_critic_accepts_shared_and_batched_particles():
 
     assert shared_particles.shape == (4, 4)
     assert batched_particles.shape == (4, 4)
+
+
+def test_flow_field_critic_starts_with_small_particle_scale():
+    critic = FlowFieldValueCritic(
+        state_dim=3,
+        hidden_dim=8,
+        particle_scale=0.05,
+        max_velocity=5.0,
+    )
+    states = torch.zeros(2, 3)
+    z = torch.tensor([-1.0, 0.0, 1.0])
+
+    particles = critic(states, z)
+    expected = 0.05 * z.expand(2, 3)
+
+    assert torch.allclose(particles, expected, atol=1e-6)
 
 
 def test_tail_weighting_in_spectral_residual_uses_normal_quantiles():
