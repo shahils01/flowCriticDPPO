@@ -52,8 +52,9 @@ class MujocoRunner(Runner):
                 obs, rewards, terminated, truncated, infos = self.envs.step(actions)
                 # self.envs.render()
                 rewards = rewards.reshape(-1, 1)
-                dones = terminated.reshape(-1, 1)
+                terminated = terminated.reshape(-1, 1)
                 truncated = truncated.reshape(-1, 1)
+                dones = np.logical_or(terminated, truncated)
                                 
                 dones_env = np.all(dones, axis=1)
                 reward_env = np.mean(rewards).flatten()
@@ -63,8 +64,9 @@ class MujocoRunner(Runner):
                         done_episodes_rewards.append(train_episode_rewards[t])
                         train_episode_rewards[t] = 0
 
-                # Bootstrap reward for truncated episodes (Done after computing train_episode_rewards)
-                rewards += self.all_args.gamma * np.mean(values, axis=-1,keepdims=True) * truncated
+                # Bootstrap reward for truncated episodes. Disabled for now because
+                # value particles may be normalized and GAE should not cross resets.
+                # rewards += self.all_args.gamma * np.mean(values, axis=-1, keepdims=True) * truncated
 
                 data = obs, rewards, dones, infos, \
                        values, actions, action_log_probs
