@@ -143,18 +143,26 @@ def _align_states_and_particles(states, z, state_dim, z_dim):
 
     batch_shape = states.shape[:-1]
 
-    if z.dim() == 1:
-        z = z.view(*([1] * len(batch_shape)), z.shape[0], 1)
-        z = z.expand(*batch_shape, z.shape[-2], z_dim)
-    elif (
-        z.dim() >= 2
-        and z.shape[-1] == z_dim
-        and not _is_broadcastable_to(z.shape[:-1], batch_shape)
-    ):
-        z = z.expand(*batch_shape, z.shape[-2], z_dim)
+    if z.dim() == 0:
+        raise ValueError("z must contain a particle dimension")
+
+    if z.dim() >= 2 and z.shape[-1] == z_dim:
+        num_particles = z.shape[-2]
+        z_batch_shape = z.shape[:-2]
     else:
+        num_particles = z.shape[-1]
+        z_batch_shape = z.shape[:-1]
         z = z.unsqueeze(-1)
-        z = z.expand(*batch_shape, z.shape[-2], z_dim)
+        if z_dim != 1:
+            z = z.expand(*z.shape[:-1], z_dim)
+
+    if not _is_broadcastable_to(z_batch_shape, batch_shape):
+        raise ValueError(
+            "z batch shape must be broadcastable to states batch shape: "
+            f"got {tuple(z_batch_shape)} and {tuple(batch_shape)}"
+        )
+
+    z = z.expand(*batch_shape, num_particles, z_dim)
 
     states = states.unsqueeze(-2).expand(*batch_shape, z.shape[-2], state_dim)
     return states, z

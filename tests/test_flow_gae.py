@@ -1,6 +1,7 @@
 import torch
 
 from ppo.algorithms.ppo.flow_gae import (
+    ValueFlowCritic,
     compute_flow_gae,
     normal_cdf,
     quantile_weight,
@@ -42,6 +43,20 @@ def test_upper_tail_weighting_only_uses_q_above_one_minus_alpha():
     expected = torch.tensor([0.0, 0.0, 4.0, 4.0])
 
     assert torch.equal(weights, expected)
+
+
+def test_value_flow_critic_accepts_shared_and_batched_particles():
+    critic = ValueFlowCritic(state_dim=3, hidden_dim=8)
+    states = torch.zeros(4, 3)
+
+    shared_z = torch.linspace(-1.0, 1.0, 4).unsqueeze(-1)
+    shared_particles = critic(states, shared_z)
+
+    batched_z = torch.linspace(-1.0, 1.0, 4).repeat(4, 1)
+    batched_particles = critic(states, batched_z)
+
+    assert shared_particles.shape == (4, 4)
+    assert batched_particles.shape == (4, 4)
 
 
 def test_tail_weighting_in_spectral_residual_uses_normal_quantiles():
