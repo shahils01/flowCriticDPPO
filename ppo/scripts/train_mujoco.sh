@@ -21,7 +21,7 @@ python train/train_mujoco.py \
  --max_grad_norm 0.8 \
  --eval_episodes 2 \
  --n_training_threads 32 \
- --n_rollout_threads 64 \
+ --n_rollout_threads 32 \
  --num_mini_batch 1 \
  --episode_length 2048 \
  --eval_interval 25 \
@@ -33,8 +33,11 @@ python train/train_mujoco.py \
  --use_state_agent \
  --use_value_active_masks \
  --use_policy_active_masks \
- --num_quants 64 \
-#  --use_wandb True \
-#  --wandb_name "xxx" \
-#  --user_name "shahil-shaik7-clemson-university" \
-#  --moe_policy True
+ --num_quants 16 \
+ --critic_type flow_field \
+ --flow_particle_scale 0.05 \
+ --flow_max_velocity 5.0 \
+ --flow_weight_mode uniform \
+ --use_wandb True \
+ --wandb_name "xxx" \
+ --user_name "shahil-shaik7-clemson-university" \
