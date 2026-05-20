@@ -185,8 +185,10 @@ class PPO_Policy:
     def critic_flow_matching_loss(self, obs, returns):
         if isinstance(self.obs_shape, dict):
             obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
+            obs = {k: check(v).to(**self.tpdv) for k, v in obs.items()}
         else:
             obs = obs.reshape(-1, *self.obs_shape)
+            obs = check(obs).to(**self.tpdv)
         return self.transformer.critic_flow_matching_loss(obs, returns)
 
     def act(self, obs, masks):

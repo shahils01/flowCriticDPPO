@@ -11,8 +11,8 @@ python train/train_mujoco.py \
  --algorithm_name ${algo} \
  --experiment_name ${exp} \
  --scenario ${scenario} \
- --use_value_entropy True \
- --true_integration True \
+ --use_value_entropy \
+ --true_integration \
  --critic_lr 3e-4 \
  --lr 3e-4 \
  --entropy_coef 0.01 \
@@ -38,7 +38,6 @@ python train/train_mujoco.py \
  --num_flow_steps 8 \
  --flow_particle_scale 0.1 \
  --flow_time_embed_dim 64 \
- --flow_particle_scale 0.05 \
  --flow_max_velocity 5.0 \
  --flow_weight_mode uniform \
  --use_wandb True \
