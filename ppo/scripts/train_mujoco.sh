@@ -15,7 +15,7 @@ python train/train_mujoco.py \
  --true_integration \
  --critic_lr 3e-4 \
  --lr 3e-4 \
- --entropy_coef 0.01 \
+ --entropy_coef 0.001 \
  --gamma 0.99 \
  --gae_lambda 0.95 \
  --max_grad_norm 0.8 \
@@ -36,7 +36,7 @@ python train/train_mujoco.py \
  --num_quants 16 \
  --critic_type floq \
  --num_flow_steps 8 \
- --flow_particle_scale 0.1 \
+ --flow_particle_scale 1.0 \
  --flow_time_embed_dim 64 \
  --flow_max_velocity 5.0 \
  --flow_weight_mode uniform \
