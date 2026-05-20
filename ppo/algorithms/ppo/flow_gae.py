@@ -14,6 +14,15 @@ def make_standard_normal_particles(num_particles, device=None):
     return math.sqrt(2.0) * torch.erfinv(2.0 * q - 1.0)
 
 
+def make_uniform_particles(num_particles, device=None, low=-1.0, high=1.0):
+    if device is None:
+        device = torch.device("cpu")
+    if num_particles == 1:
+        return torch.zeros(1, device=device)
+    q = (torch.arange(num_particles, dtype=torch.float32, device=device) + 0.5) / num_particles
+    return low + (high - low) * q
+
+
 class ValueFlowCritic(nn.Module):
     """
     Practical state-conditioned transport map T_phi(s, z).
@@ -84,17 +93,32 @@ class FlowVectorField(nn.Module):
         num_layers=2,
         max_velocity=5.0,
         zero_init_output=True,
+        time_embed_dim=0,
     ):
         super().__init__()
         if num_layers < 1:
             raise ValueError("num_layers must be at least 1")
+        if time_embed_dim < 0 or time_embed_dim % 2 != 0:
+            raise ValueError("time_embed_dim must be a non-negative even integer")
 
         self.state_dim = state_dim
         self.z_dim = z_dim
         self.max_velocity = max_velocity
+        self.time_embed_dim = time_embed_dim
+        if time_embed_dim > 0:
+            frequencies = torch.exp(
+                torch.linspace(
+                    math.log(1.0),
+                    math.log(1000.0),
+                    time_embed_dim // 2,
+                    dtype=torch.float32,
+                )
+            )
+            self.register_buffer("time_frequencies", frequencies)
 
         layers = []
-        input_dim = state_dim + z_dim + 1
+        time_dim = time_embed_dim if time_embed_dim > 0 else 1
+        input_dim = state_dim + z_dim + time_dim
         for layer_idx in range(num_layers):
             in_dim = input_dim if layer_idx == 0 else hidden_dim
             layers.extend([nn.Linear(in_dim, hidden_dim), nn.GELU()])
@@ -106,7 +130,13 @@ class FlowVectorField(nn.Module):
     def forward(self, states, x, tau):
         tau = torch.as_tensor(tau, dtype=x.dtype, device=x.device)
         tau = tau.expand_as(x[..., :1])
-        features = torch.cat([states, x, tau], dim=-1)
+        if self.time_embed_dim > 0:
+            freqs = self.time_frequencies.to(dtype=x.dtype, device=x.device)
+            angles = 2.0 * math.pi * tau * freqs
+            tau_features = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        else:
+            tau_features = tau
+        features = torch.cat([states, x, tau_features], dim=-1)
         velocity = self.net(features)
         if self.max_velocity is not None:
             velocity = self.max_velocity * torch.tanh(velocity / self.max_velocity)
@@ -194,6 +224,80 @@ class FlowFieldValueCritic(nn.Module):
                 scale = scale.clamp(max=self.max_particle_scale)
             return scale
         return self.fixed_particle_scale.to(dtype=dtype, device=device)
+
+    def _rk4_step(self, states, x, tau, dt):
+        k1 = self.vector_field(states, x, tau)
+        k2 = self.vector_field(states, x + 0.5 * dt * k1, tau + 0.5 * dt)
+        k3 = self.vector_field(states, x + 0.5 * dt * k2, tau + 0.5 * dt)
+        k4 = self.vector_field(states, x + dt * k3, tau + dt)
+        return x + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+class FloQValueCritic(nn.Module):
+    """
+    FloQ-style value critic.
+
+    This critic has no monolithic/base value head. It maps uniform initial
+    particles z_0 to value particles by integrating a state-conditioned velocity
+    field, and exposes a linear flow-matching loss for supervised value targets.
+    """
+
+    def __init__(
+        self,
+        state_dim,
+        hidden_dim=128,
+        z_dim=1,
+        num_layers=2,
+        num_flow_steps=8,
+        integrator="euler",
+        max_velocity=5.0,
+        time_embed_dim=64,
+    ):
+        super().__init__()
+        if num_flow_steps < 1:
+            raise ValueError("num_flow_steps must be at least 1")
+        if integrator not in {"euler", "rk4"}:
+            raise ValueError("integrator must be either 'euler' or 'rk4'")
+
+        self.state_dim = state_dim
+        self.z_dim = z_dim
+        self.num_flow_steps = num_flow_steps
+        self.integrator = integrator
+        self.vector_field = FlowVectorField(
+            state_dim=state_dim,
+            hidden_dim=hidden_dim,
+            z_dim=z_dim,
+            num_layers=num_layers,
+            max_velocity=max_velocity,
+            time_embed_dim=time_embed_dim,
+        )
+
+    def forward(self, states, z):
+        states, x = _align_states_and_particles(states, z, self.state_dim, self.z_dim)
+        dt = 1.0 / self.num_flow_steps
+
+        for step in range(self.num_flow_steps):
+            tau = step * dt
+            if self.integrator == "euler":
+                x = x + dt * self.vector_field(states, x, tau)
+            else:
+                x = self._rk4_step(states, x, tau, dt)
+
+        return x.squeeze(-1)
+
+    def flow_matching_loss(self, states, z0, targets):
+        states, x0 = _align_states_and_particles(states, z0, self.state_dim, self.z_dim)
+        targets = torch.as_tensor(targets, dtype=x0.dtype, device=x0.device)
+        if targets.dim() >= 3 and targets.shape[-1] == self.z_dim:
+            targets = targets.squeeze(-1)
+        targets = targets.unsqueeze(-1)
+        targets = targets.expand_as(x0)
+
+        t = torch.rand_like(x0)
+        x_t = (1.0 - t) * x0 + t * targets
+        target_velocity = targets - x0
+        pred_velocity = self.vector_field(states, x_t, t)
+        return (pred_velocity - target_velocity).pow(2).squeeze(-1)
 
     def _rk4_step(self, states, x, tau, dt):
         k1 = self.vector_field(states, x, tau)

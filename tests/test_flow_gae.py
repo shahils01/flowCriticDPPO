@@ -1,9 +1,11 @@
 import torch
 
 from ppo.algorithms.ppo.flow_gae import (
+    FloQValueCritic,
     FlowFieldValueCritic,
     ValueFlowCritic,
     compute_flow_gae,
+    make_uniform_particles,
     normal_cdf,
     quantile_weight,
     spectral_td_residual,
@@ -74,6 +76,25 @@ def test_flow_field_critic_starts_with_small_particle_scale():
     expected = 0.05 * z.expand(2, 3)
 
     assert torch.allclose(particles, expected, atol=1e-6)
+
+
+def test_floq_critic_uses_uniform_particles_without_base_head():
+    critic = FloQValueCritic(
+        state_dim=3,
+        hidden_dim=8,
+        num_flow_steps=2,
+        max_velocity=5.0,
+        time_embed_dim=8,
+    )
+    states = torch.zeros(2, 3)
+    z = 0.1 * make_uniform_particles(3)
+
+    particles = critic(states, z)
+    loss = critic.flow_matching_loss(states, z, torch.ones(2, 3))
+
+    assert not hasattr(critic, "base_head")
+    assert particles.shape == (2, 3)
+    assert loss.shape == (2, 3)
 
 
 def test_tail_weighting_in_spectral_residual_uses_normal_quantiles():

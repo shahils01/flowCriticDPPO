@@ -286,8 +286,8 @@ def get_config():
 
     # add for distributional citic
     parser.add_argument("--critic_type", type=str, default="direct",
-                        choices=["direct", "flow_field", "legacy", "flow"],
-                        help="critic implementation: direct uses the MLP transport map, flow_field uses an ODE vector field, legacy uses the original MLP critic; flow is an alias for direct")
+                        choices=["direct", "flow_field", "floq", "legacy", "flow"],
+                        help="critic implementation: direct uses the MLP transport map, flow_field uses an ODE vector field with a base value head, floq uses a uniform-noise flow-matching critic without a base head, legacy uses the original MLP critic; flow is an alias for direct")
     parser.add_argument("--num_quants", type=int, default=64)
     parser.add_argument("--num_flow_steps", type=int, default=8,
                         help="number of integration steps for critic_type=flow_field")
@@ -300,6 +300,8 @@ def get_config():
                         help="maximum learned particle scale for critic_type=flow_field")
     parser.add_argument("--flow_max_velocity", type=float, default=5.0,
                         help="tanh-clipped vector-field velocity bound for critic_type=flow_field")
+    parser.add_argument("--flow_time_embed_dim", type=int, default=64,
+                        help="Fourier time embedding dimension for critic_type=floq")
     parser.add_argument("--flow_weight_mode", type=str, default="uniform",
                         choices=["uniform", "lower_tail", "upper_tail", "smooth_lower_tail", "smooth_upper_tail"],
                         help="spectral quantile weighting mode for flow GAE")

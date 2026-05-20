@@ -40,6 +40,9 @@ class PPOTrainer:
         self._use_valuenorm = args.use_valuenorm
         self._use_value_active_masks = args.use_value_active_masks
         self._use_policy_active_masks = args.use_policy_active_masks
+        self.critic_type = getattr(args, "critic_type", "direct")
+        if self.critic_type == "flow":
+            self.critic_type = "direct"
         
         if self._use_valuenorm:
             self.value_normalizer = ValueNorm(self.num_quants, device=self.device)
@@ -89,6 +92,26 @@ class PPOTrainer:
 
         return value_loss
 
+    def cal_floq_value_loss(self, obs_batch, return_batch, active_masks_batch):
+        """
+        FloQ value loss.
+
+        Instead of regressing integrated values directly, train the critic
+        velocity field to transport uniform particles toward the PPO return
+        targets via linear flow matching.
+        """
+        if self._use_valuenorm:
+            self.value_normalizer.update(return_batch)
+            targets = self.value_normalizer.normalize(return_batch)
+        else:
+            targets = return_batch
+
+        flow_loss = self.policy.critic_flow_matching_loss(obs_batch, targets)
+        if self._use_value_active_masks:
+            value_mask = active_masks_batch.expand_as(flow_loss)
+            return (flow_loss * value_mask).sum() / value_mask.sum().clamp_min(1.0)
+        return flow_loss.mean()
+
     def ppo_update(self, sample, obs_shape=None):
         """
         Update actor and critic networks.
@@ -130,7 +153,10 @@ class PPOTrainer:
             policy_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
 
         # critic update
-        value_loss = self.cal_value_loss(values, value_preds_batch, return_batch, active_masks_batch)
+        if self.critic_type == "floq":
+            value_loss = self.cal_floq_value_loss(obs_batch, return_batch, active_masks_batch)
+        else:
+            value_loss = self.cal_value_loss(values, value_preds_batch, return_batch, active_masks_batch)
 
         if not isinstance(obs_batch, dict):
             if obs_shape is not None:

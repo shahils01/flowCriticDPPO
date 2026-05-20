@@ -64,7 +64,8 @@ class PPO_Policy:
                                flow_integrator=getattr(args, "flow_integrator", "euler"),
                                flow_particle_scale=getattr(args, "flow_particle_scale", 0.05),
                                flow_max_particle_scale=getattr(args, "flow_max_particle_scale", 2.0),
-                               flow_max_velocity=getattr(args, "flow_max_velocity", 5.0))
+                               flow_max_velocity=getattr(args, "flow_max_velocity", 5.0),
+                               flow_time_embed_dim=getattr(args, "flow_time_embed_dim", 64))
 
         self.optimizer = torch.optim.Adam(
             [
@@ -180,6 +181,13 @@ class PPO_Policy:
             return values, action_log_probs, entropy, gate_entropy.mean()
         else:
             return values, action_log_probs, entropy, gate_entropy
+
+    def critic_flow_matching_loss(self, obs, returns):
+        if isinstance(self.obs_shape, dict):
+            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
+        else:
+            obs = obs.reshape(-1, *self.obs_shape)
+        return self.transformer.critic_flow_matching_loss(obs, returns)
 
     def act(self, obs, masks):
         """

@@ -1,7 +1,11 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
-from ppo.algorithms.ppo.flow_gae import compute_flow_gae, make_standard_normal_particles
+from ppo.algorithms.ppo.flow_gae import (
+    compute_flow_gae,
+    make_standard_normal_particles,
+    make_uniform_particles,
+)
 from ppo.utils.util import get_shape_from_obs_space, get_shape_from_act_space
 
 
@@ -160,7 +164,7 @@ class SharedReplayBuffer(object):
         :param value_normalizer: (PopArt) If not None, PopArt value normalizer instance.
         """
         self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
-        if self.critic_type in {"direct", "flow_field"}:
+        if self.critic_type in {"direct", "flow_field", "floq"}:
             self.compute_flow_returns(value_normalizer)
             return
 
@@ -207,7 +211,10 @@ class SharedReplayBuffer(object):
         next_particles = value_particles[1:]
         masks = self.masks[1:]
 
-        z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
+        if self.critic_type == "floq":
+            z = make_uniform_particles(self.num_quants, torch.device("cpu"))
+        else:
+            z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
         advantages = compute_flow_gae(
             rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
             current_particles=torch.as_tensor(current_particles, dtype=torch.float32),

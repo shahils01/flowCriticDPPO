@@ -10,7 +10,13 @@ from ppo.algorithms.utils.transformer_act import discrete_parallel_act
 from ppo.algorithms.utils.transformer_act import continuous_autoregreesive_act
 from ppo.algorithms.utils.transformer_act import continuous_parallel_act
 from ppo.algorithms.utils.transformer_act import continuous_moe_act, continuous_moe_eval
-from ppo.algorithms.ppo.flow_gae import FlowFieldValueCritic, ValueFlowCritic, make_standard_normal_particles
+from ppo.algorithms.ppo.flow_gae import (
+    FloQValueCritic,
+    FlowFieldValueCritic,
+    ValueFlowCritic,
+    make_standard_normal_particles,
+    make_uniform_particles,
+)
 
 
 def init_(m, gain=0.01, activate=False):
@@ -98,6 +104,7 @@ class PPO(nn.Module):
         flow_particle_scale=0.05,
         flow_max_particle_scale=2.0,
         flow_max_velocity=5.0,
+        flow_time_embed_dim=64,
     ):
         super(PPO, self).__init__()
 
@@ -125,6 +132,20 @@ class PPO(nn.Module):
                 max_velocity=flow_max_velocity,
             )
             self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
+        elif self.critic_type == "floq":
+            self.critic = FloQValueCritic(
+                obs_shape,
+                hidden_dim=n_embd,
+                num_flow_steps=num_flow_steps,
+                integrator=flow_integrator,
+                max_velocity=flow_max_velocity,
+                time_embed_dim=flow_time_embed_dim,
+            )
+            self.register_buffer(
+                "critic_particles",
+                flow_particle_scale
+                * make_uniform_particles(num_quants, device, low=-1.0, high=1.0),
+            )
         elif self.critic_type == "legacy":
             self.critic = Critic(obs_shape, n_embd, device, num_quants)
             self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
@@ -141,9 +162,14 @@ class PPO(nn.Module):
             self.actor.zero_std(self.device)
 
     def critic_values(self, obs):
-        if self.critic_type in {"direct", "flow_field"}:
+        if self.critic_type in {"direct", "flow_field", "floq"}:
             return self.critic(obs, self.critic_particles)
         return self.critic(obs)
+
+    def critic_flow_matching_loss(self, obs, returns):
+        if self.critic_type != "floq":
+            raise RuntimeError("critic_flow_matching_loss is only available for critic_type='floq'")
+        return self.critic.flow_matching_loss(obs, self.critic_particles, returns)
 
     def forward(self, obs, action, gate_entropy=None):
         # state: (batch, n_agent, state_dim)

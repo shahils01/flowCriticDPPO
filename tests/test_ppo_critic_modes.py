@@ -4,7 +4,7 @@ import torch
 
 from ppo.algorithms.ppo.algorithm.PPO import Critic, PPO
 from ppo.algorithms.ppo.algorithm.ppo_policy import PPO_Policy
-from ppo.algorithms.ppo.flow_gae import FlowFieldValueCritic, ValueFlowCritic
+from ppo.algorithms.ppo.flow_gae import FloQValueCritic, FlowFieldValueCritic, ValueFlowCritic
 
 
 class Box:
@@ -32,6 +32,7 @@ def _policy_args(lr=3e-4, critic_lr=1e-4):
         flow_particle_scale=0.05,
         flow_max_particle_scale=2.0,
         flow_max_velocity=5.0,
+        flow_time_embed_dim=8,
     )
 
 
@@ -61,6 +62,28 @@ def test_ppo_can_use_flow_field_critic_by_flag():
     assert model.critic.num_flow_steps == 3
     assert model.critic.integrator == "rk4"
     assert values.shape == (4, 5)
+
+
+def test_ppo_can_use_floq_critic_by_flag():
+    model = PPO(
+        obs_shape=3,
+        action_dim=2,
+        n_embd=8,
+        num_quants=5,
+        critic_type="floq",
+        num_flow_steps=3,
+        flow_particle_scale=0.1,
+        flow_time_embed_dim=8,
+    )
+
+    values = model.get_values(torch.zeros(4, 3))
+    flow_loss = model.critic_flow_matching_loss(torch.zeros(4, 3), torch.ones(4, 5))
+
+    assert isinstance(model.critic, FloQValueCritic)
+    assert not hasattr(model.critic, "base_head")
+    assert torch.allclose(model.critic_particles, torch.tensor([-0.08, -0.04, 0.0, 0.04, 0.08]))
+    assert values.shape == (4, 5)
+    assert flow_loss.shape == (4, 5)
 
 
 def test_policy_optimizer_uses_separate_critic_lr():
