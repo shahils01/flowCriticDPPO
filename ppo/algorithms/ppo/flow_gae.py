@@ -441,6 +441,40 @@ def spectral_td_residual(
     return (weights * td_particles).mean(dim=-1, keepdim=True)
 
 
+def terminal_map_entropy(value_particles, z, eps=1e-6):
+    """
+    Estimate entropy of the terminal one-dimensional value-flow distribution.
+
+    For ordered base particles z_0 and terminal particles T(s, z_0), use the
+    change-of-variables approximation:
+        H[T(s, Z)] ~= H[Z] + E_z log |dT(s, z) / dz|.
+
+    The derivative is estimated with finite differences over adjacent particles.
+    """
+    value_particles = torch.as_tensor(value_particles)
+    z = torch.as_tensor(z, dtype=value_particles.dtype, device=value_particles.device)
+    if z.dim() != 1:
+        raise ValueError("z must be a one-dimensional particle grid")
+    if z.numel() < 2:
+        return torch.zeros_like(value_particles[..., :1])
+    if value_particles.shape[-1] != z.numel():
+        raise ValueError(
+            "value_particles last dimension must match z: "
+            f"got {value_particles.shape[-1]} and {z.numel()}"
+        )
+
+    dz = z[1:] - z[:-1]
+    if torch.any(dz == 0):
+        raise ValueError("z particles must be distinct")
+
+    slopes = (value_particles[..., 1:] - value_particles[..., :-1]) / dz
+    log_abs_jacobian = slopes.abs().clamp_min(eps).log().mean(dim=-1, keepdim=True)
+
+    base_width = (z[-1] - z[0]).abs() + dz.abs().mean()
+    base_entropy = base_width.clamp_min(eps).log()
+    return base_entropy + log_abs_jacobian
+
+
 def compute_flow_gae(
     rewards,
     current_particles,
@@ -453,6 +487,9 @@ def compute_flow_gae(
     alpha=0.1,
     eta=1.0,
     weights=None,
+    entropy_beta=0.0,
+    entropy_delta_mode="bellman",
+    entropy_eps=1e-6,
 ):
     """
     Compute spectral GAE by backward recursion:
@@ -480,6 +517,18 @@ def compute_flow_gae(
         eta=eta,
         weights=weights,
     )
+    if entropy_beta != 0.0:
+        current_entropy = terminal_map_entropy(current_particles, z, eps=entropy_eps)
+        next_entropy = terminal_map_entropy(next_particles, z, eps=entropy_eps)
+        if entropy_delta_mode == "bellman":
+            entropy_delta = gamma * masks * next_entropy - current_entropy
+        elif entropy_delta_mode == "difference":
+            entropy_delta = masks * (next_entropy - current_entropy)
+        else:
+            raise ValueError(
+                "entropy_delta_mode must be either 'bellman' or 'difference'"
+            )
+        deltas = deltas + entropy_beta * entropy_delta
 
     advantages = torch.zeros_like(deltas)
     gae = torch.zeros_like(deltas[-1])

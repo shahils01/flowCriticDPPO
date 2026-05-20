@@ -7,6 +7,7 @@ from ppo.algorithms.ppo.flow_gae import (
     compute_flow_gae,
     make_uniform_particles,
     normal_cdf,
+    terminal_map_entropy,
     quantile_weight,
     spectral_td_residual,
 )
@@ -95,6 +96,41 @@ def test_floq_critic_uses_uniform_particles_without_base_head():
     assert not hasattr(critic, "base_head")
     assert particles.shape == (2, 3)
     assert loss.shape == (2, 3)
+
+
+def test_terminal_map_entropy_matches_linear_uniform_flow():
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+    scale = 3.0
+    values = scale * z.expand(2, 4)
+
+    entropy = terminal_map_entropy(values, z)
+
+    expected = torch.full((2, 1), torch.log(torch.tensor(2.0 * scale)))
+    assert torch.allclose(entropy, expected)
+
+
+def test_compute_flow_gae_can_add_bellman_entropy_delta():
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+    rewards = torch.zeros(1, 1, 1)
+    current = z.reshape(1, 1, 4)
+    next_values = (2.0 * z).reshape(1, 1, 4)
+
+    advantages = compute_flow_gae(
+        rewards=rewards,
+        current_particles=current,
+        next_particles=next_values,
+        z=z,
+        gamma=1.0,
+        gae_lambda=1.0,
+        mode="uniform",
+        entropy_beta=0.5,
+    )
+
+    expected_drift = (next_values - current).mean(dim=-1, keepdim=True)
+    expected_entropy_delta = torch.log(torch.tensor(4.0)) - torch.log(torch.tensor(2.0))
+    expected = expected_drift + 0.5 * expected_entropy_delta
+
+    assert torch.allclose(advantages, expected)
 
 
 def test_tail_weighting_in_spectral_residual_uses_normal_quantiles():

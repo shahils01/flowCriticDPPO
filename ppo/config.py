@@ -309,6 +309,13 @@ def get_config():
                         help="tail mass for lower_tail and upper_tail flow weighting")
     parser.add_argument("--flow_eta", type=float, default=1.0,
                         help="temperature for smooth flow quantile weighting")
+    parser.add_argument("--flow_entropy_beta", type=float, default=0.0,
+                        help="coefficient for terminal-map entropy difference in flow GAE; 0 disables it")
+    parser.add_argument("--flow_entropy_delta_mode", type=str, default="bellman",
+                        choices=["bellman", "difference"],
+                        help="entropy term for flow GAE: bellman uses gamma*H(next)-H(current), difference uses H(next)-H(current)")
+    parser.add_argument("--flow_entropy_eps", type=float, default=1e-6,
+                        help="minimum absolute Jacobian used in terminal-map entropy estimation")
     parser.add_argument("--use_value_entropy", action='store_true', default=False)
     parser.add_argument("--true_integration", action='store_true', default=False)
     parser.add_argument("--dgae_epsilon", type=float, default=1.0, help=" coefficience of entropy term in Wasserstein-like directional metric.")

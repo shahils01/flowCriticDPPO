@@ -54,6 +54,9 @@ class SharedReplayBuffer(object):
         self.flow_weight_mode = getattr(args, "flow_weight_mode", "uniform")
         self.flow_alpha = getattr(args, "flow_alpha", 0.1)
         self.flow_eta = getattr(args, "flow_eta", 1.0)
+        self.flow_entropy_beta = getattr(args, "flow_entropy_beta", 0.0)
+        self.flow_entropy_delta_mode = getattr(args, "flow_entropy_delta_mode", "bellman")
+        self.flow_entropy_eps = getattr(args, "flow_entropy_eps", 1e-6)
         self.dgae_epsilon = args.dgae_epsilon
         self.use_value_entropy = args.use_value_entropy
         self.true_integration = args.true_integration
@@ -226,6 +229,9 @@ class SharedReplayBuffer(object):
             mode=self.flow_weight_mode,
             alpha=self.flow_alpha,
             eta=self.flow_eta,
+            entropy_beta=self.flow_entropy_beta,
+            entropy_delta_mode=self.flow_entropy_delta_mode,
+            entropy_eps=self.flow_entropy_eps,
         ).detach().cpu().numpy()
 
         self.advantages[:] = advantages
