@@ -122,7 +122,7 @@ class Runner(object):
         raise NotImplementedError
     
     @torch.no_grad()
-    def compute(self):
+    def compute(self, flow_weight_mode="uniform"):
         """Calculate returns for the collected data."""
         self.trainer.prep_rollout()
         next_values = self.trainer.policy.get_values(self.buffer.get_step_obs(-1),
@@ -130,7 +130,7 @@ class Runner(object):
         
         next_values = _t2n(next_values)
         # next_values = next_values.reshape(self.n_rollout_threads, -1)
-        self.buffer.compute_returns(next_values, self.trainer.value_normalizer)
+        self.buffer.compute_returns(next_values, self.trainer.value_normalizer, flow_weight_mode)
     
     def train(self):
         """Train policies with data in buffer. """

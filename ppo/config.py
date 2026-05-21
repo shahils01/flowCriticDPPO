@@ -305,6 +305,8 @@ def get_config():
     parser.add_argument("--flow_weight_mode", type=str, default="uniform",
                         choices=["uniform", "lower_tail", "upper_tail", "smooth_lower_tail", "smooth_upper_tail"],
                         help="spectral quantile weighting mode for flow GAE")
+    parser.add_argument("--exploration_steps", type=int, default=None,
+                        help="Number of exploration steps at the start of training")
     parser.add_argument("--flow_alpha", type=float, default=0.1,
                         help="tail mass for lower_tail and upper_tail flow weighting")
     parser.add_argument("--flow_eta", type=float, default=1.0,

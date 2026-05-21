@@ -66,7 +66,7 @@ class MujocoRunner(Runner):
 
                 # Bootstrap reward for truncated episodes. Disabled for now because
                 # value particles may be normalized and GAE should not cross resets.
-                # rewards += self.all_args.gamma * np.mean(values, axis=-1, keepdims=True) * truncated
+                rewards += self.all_args.gamma * np.mean(values, axis=-1, keepdims=True) * truncated
 
                 data = obs, rewards, dones, infos, \
                        values, actions, action_log_probs
@@ -74,7 +74,13 @@ class MujocoRunner(Runner):
                 self.insert(data)
 
             # compute return and update network
-            self.compute()
+            if self.all_args.exploration_steps:
+                if episode <= self.all_args.exploration_steps:
+                    self.compute(flow_weight_mode="smooth_upper_tail")
+                else:
+                    self.compute(flow_weight_mode=self.all_args.flow_weight_mode)
+            else:
+                self.compute(flow_weight_mode=self.all_args.flow_weight_mode)
             train_infos = self.train()
 
             # post process

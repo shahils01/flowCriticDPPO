@@ -160,7 +160,7 @@ class SharedReplayBuffer(object):
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
 
-    def compute_returns(self, next_value, value_normalizer=None):
+    def compute_returns(self, next_value, value_normalizer=None, flow_weight_mode="uniform"):
         """
         Compute returns either as discounted sum of rewards, or using GAE.
         :param next_value: (np.ndarray) value predictions for the step after the last episode step.
@@ -168,7 +168,7 @@ class SharedReplayBuffer(object):
         """
         self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
         if self.critic_type in {"direct", "flow_field", "floq"}:
-            self.compute_flow_returns(value_normalizer)
+            self.compute_flow_returns(value_normalizer, flow_weight_mode)
             return
 
         if self.num_quants == 1 and not self.use_legacy_scalar_gae:
@@ -208,7 +208,7 @@ class SharedReplayBuffer(object):
             return value_normalizer.denormalize(self.value_preds)
         return self.value_preds
 
-    def compute_flow_returns(self, value_normalizer=None):
+    def compute_flow_returns(self, value_normalizer=None, flow_weight_mode="uniform"):
         value_particles = self.get_denormalized_value_particles(value_normalizer)
         current_particles = value_particles[:-1]
         next_particles = value_particles[1:]
@@ -226,7 +226,7 @@ class SharedReplayBuffer(object):
             gamma=self.gamma,
             gae_lambda=self.gae_lambda,
             masks=torch.as_tensor(masks, dtype=torch.float32),
-            mode=self.flow_weight_mode,
+            mode=flow_weight_mode,
             alpha=self.flow_alpha,
             eta=self.flow_eta,
             entropy_beta=self.flow_entropy_beta,

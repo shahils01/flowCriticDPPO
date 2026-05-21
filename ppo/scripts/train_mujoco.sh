@@ -1,6 +1,6 @@
 #!/bin/sh
 env="mujoco"
-scenario="Humanoid-v5"
+scenario="Ant-v5"
 algo="ppo"
 seed=0
 
@@ -39,7 +39,10 @@ python train/train_mujoco.py \
  --flow_particle_scale 1.0 \
  --flow_time_embed_dim 64 \
  --flow_max_velocity 5.0 \
- --flow_weight_mode uniform \
+ --flow_entropy_beta 0.01 \
+ --flow_entropy_delta_mode bellman \
+ --flow_weight_mode smooth_upper_tail \
+ --exploration_steps 500000\
  --use_wandb True \
  --wandb_name "xxx" \
  --user_name "shahil-shaik7-clemson-university" \
