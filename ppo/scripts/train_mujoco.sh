@@ -1,6 +1,6 @@
 #!/bin/sh
 env="mujoco"
-scenario="Ant-v5"
+scenario="Humanoid-v5"
 algo="ppo"
 seed=0
 

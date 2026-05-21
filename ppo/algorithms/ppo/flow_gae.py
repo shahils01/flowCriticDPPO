@@ -293,9 +293,15 @@ class FloQValueCritic(nn.Module):
         targets = targets.unsqueeze(-1)
         targets = targets.expand_as(x0)
 
-        t = torch.rand_like(x0)
-        x_t = (1.0 - t) * x0 + t * targets
-        target_velocity = targets - x0
+        # 1D OT coupling via sorting (Since Value distribution is 1D, finding optimal mapping from pred to target is simply sorting)
+        # x0: predicted/source particles
+        # x1: target particles
+        x0_sorted, idx0 = torch.sort(x0, dim=-1)
+        targets_sorted, idx1 = torch.sort(targets, dim=-1)
+
+        t = torch.rand_like(x0_sorted)
+        x_t = (1.0 - t) * x0_sorted + t * targets_sorted
+        target_velocity = targets_sorted - x0_sorted
         pred_velocity = self.vector_field(states, x_t, t)
         return (pred_velocity - target_velocity).pow(2).squeeze(-1)
 
