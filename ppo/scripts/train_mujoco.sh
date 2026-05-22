@@ -18,7 +18,7 @@ python train/train_mujoco.py \
  --entropy_coef 0.001 \
  --gamma 0.99 \
  --gae_lambda 0.95 \
- --max_grad_norm 0.8 \
+ --max_grad_norm 1.0 \
  --eval_episodes 2 \
  --n_training_threads 32 \
  --n_rollout_threads 64 \
@@ -35,14 +35,15 @@ python train/train_mujoco.py \
  --use_policy_active_masks \
  --num_quants 16 \
  --critic_type floq \
+ --flow_integrator euler \
  --num_flow_steps 8 \
  --flow_particle_scale 1.0 \
  --flow_time_embed_dim 64 \
  --flow_max_velocity 5.0 \
- --flow_entropy_beta 0.01 \
+ --flow_entropy_beta 0.1 \
  --flow_entropy_delta_mode bellman \
- --flow_weight_mode smooth_upper_tail \
- --exploration_steps 500000\
+ --flow_weight_mode uniform \
+ --exploration_steps 0 \
  --use_wandb True \
  --wandb_name "xxx" \
  --user_name "shahil-shaik7-clemson-university" \
