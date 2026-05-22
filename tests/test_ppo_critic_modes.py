@@ -35,6 +35,9 @@ def _policy_args(lr=3e-4, critic_lr=1e-4):
         flow_time_embed_dim=8,
         policy_type="gaussian",
         flow_policy_max_velocity=5.0,
+        flow_policy_base_std=0.35,
+        flow_policy_loss_samples=8,
+        flow_policy_output_scale=0.25,
     )
 
 
@@ -146,11 +149,11 @@ def test_ppo_can_use_one_step_flow_policy_by_flag():
 
     assert isinstance(model.actor, FlowActor)
     assert actions.shape == (4, 2)
-    assert action_log_proxy.shape == (4, 2)
+    assert action_log_proxy.shape == (4, 1)
     assert values.shape == (4, 5)
-    assert eval_log_proxy.shape == (4, 2)
+    assert eval_log_proxy.shape == (4, 1)
     assert eval_values.shape == (4, 5)
-    assert entropy.shape == (4, 2)
+    assert entropy.shape == (4, 1)
     assert torch.isfinite(eval_log_proxy).all()
     assert any(p.grad is not None for p in model.actor.parameters())
 

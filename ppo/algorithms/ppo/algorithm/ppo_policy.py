@@ -53,6 +53,7 @@ class PPO_Policy:
         self.num_quants = num_quants
         self.critic_type = getattr(args, "critic_type", "direct")
         self.policy_type = getattr(args, "policy_type", "gaussian")
+        self.action_log_num = 1 if self.policy_type == "flow" else self.act_num
 
         self.transformer = PPO(self.obs_dim, 
                                self.act_dim,
@@ -68,7 +69,10 @@ class PPO_Policy:
                                flow_max_velocity=getattr(args, "flow_max_velocity", 5.0),
                                flow_time_embed_dim=getattr(args, "flow_time_embed_dim", 64),
                                policy_type=self.policy_type,
-                               flow_policy_max_velocity=getattr(args, "flow_policy_max_velocity", 5.0))
+                               flow_policy_max_velocity=getattr(args, "flow_policy_max_velocity", 5.0),
+                               flow_policy_base_std=getattr(args, "flow_policy_base_std", 0.35),
+                               flow_policy_loss_samples=getattr(args, "flow_policy_loss_samples", 8),
+                               flow_policy_output_scale=getattr(args, "flow_policy_output_scale", 0.25))
 
         self.optimizer = torch.optim.Adam(
             [
@@ -122,7 +126,7 @@ class PPO_Policy:
 
         actions, action_log_probs, values = self.transformer.get_actions(obs)
         actions = actions.view(-1, self.act_num)        
-        action_log_probs = action_log_probs.view(-1, self.act_num)
+        action_log_probs = action_log_probs.view(-1, self.action_log_num)
         values = values.view(-1, self.num_quants)
     
         return values, actions, action_log_probs
@@ -171,9 +175,9 @@ class PPO_Policy:
 
         action_log_probs, values, entropy, gate_entropy = self.transformer(obs, actions)
 
-        action_log_probs = action_log_probs.view(-1, self.act_num)
+        action_log_probs = action_log_probs.view(-1, self.action_log_num)
         values = values.view(-1, self.num_quants)
-        entropy = entropy.view(-1, self.act_num)
+        entropy = entropy.view(-1, self.action_log_num)
 
         if self._use_policy_active_masks and active_masks is not None:
             entropy = (entropy*active_masks).sum()/active_masks.sum()

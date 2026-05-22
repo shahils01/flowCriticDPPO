@@ -284,6 +284,12 @@ def get_config():
                         help="continuous actor policy: gaussian uses the original diagonal Gaussian, flow uses a one-step conditional flow with an FPO-style loss-ratio proxy")
     parser.add_argument("--flow_policy_max_velocity", type=float, default=5.0,
                         help="tanh-clipped vector-field velocity bound for policy_type=flow")
+    parser.add_argument("--flow_policy_base_std", type=float, default=0.35,
+                        help="base Gaussian noise scale for policy_type=flow")
+    parser.add_argument("--flow_policy_loss_samples", type=int, default=8,
+                        help="Monte Carlo samples used to estimate the flow policy CFM loss proxy")
+    parser.add_argument("--flow_policy_output_scale", type=float, default=0.25,
+                        help="scale applied to the flow policy velocity head")
 
     # add for online multi-task
     parser.add_argument("--train_maps", type=str, nargs='+', default=None)

@@ -92,17 +92,29 @@ class FlowActor(nn.Module):
     """
     One-step conditional flow policy for continuous actions.
 
-    The policy samples z ~ N(0, I) and takes one Euler step
-    a = z + v_theta(z, t=0, obs). For PPO updates, it returns the
+    The policy samples eps ~ N(0, I) and takes one reverse Euler step
+    a = eps - v_theta(eps, t=1, obs). For PPO updates, it returns the
     FPO-style log-ratio proxy -L_CFM(a | obs), where the conditional
-    flow-matching target is a - z at x_t = (1 - t) z + t a.
+    flow-matching target is eps - a at x_t = t eps + (1 - t) a.
     """
 
-    def __init__(self, obs_shape, action_dim, n_embd, max_velocity=5.0):
+    def __init__(
+        self,
+        obs_shape,
+        action_dim,
+        n_embd,
+        max_velocity=5.0,
+        base_std=0.35,
+        loss_samples=8,
+        output_scale=0.25,
+    ):
         super(FlowActor, self).__init__()
 
         self.action_dim = action_dim
         self.max_velocity = max_velocity
+        self.base_std = base_std
+        self.loss_samples = loss_samples
+        self.output_scale = output_scale
 
         self.net = nn.Sequential(
             nn.LayerNorm(obs_shape + action_dim + 1),
@@ -122,25 +134,56 @@ class FlowActor(nn.Module):
             t = t.expand(*x_t.shape[:-1], 1)
 
         h = torch.cat([obs, x_t, t], dim=-1)
-        v = self.net(h)
+        v = self.output_scale * self.net(h)
         if self.max_velocity is not None and self.max_velocity > 0:
             v = self.max_velocity * torch.tanh(v / self.max_velocity)
         return v
 
     def sample(self, obs, deterministic=False):
-        z = torch.zeros(*obs.shape[:-1], self.action_dim, device=obs.device, dtype=obs.dtype)
+        eps = torch.zeros(*obs.shape[:-1], self.action_dim, device=obs.device, dtype=obs.dtype)
         if not deterministic:
-            z = torch.randn_like(z)
-        t0 = torch.zeros(*obs.shape[:-1], 1, device=obs.device, dtype=obs.dtype)
-        return z + self.velocity(obs, z, t0)
+            eps = self.base_std * torch.randn_like(eps)
+        t1 = torch.ones(*obs.shape[:-1], 1, device=obs.device, dtype=obs.dtype)
+        return eps - self.velocity(obs, eps, t1)
 
-    def flow_log_prob_proxy(self, obs, action):
-        z = torch.randn_like(action)
+    def flow_matching_loss(self, obs, action, loss_samples=None):
+        loss_samples = self.loss_samples if loss_samples is None else loss_samples
+
+        if loss_samples == 1:
+            eps = self.base_std * torch.randn_like(action)
+            t = torch.rand(*action.shape[:-1], 1, device=action.device, dtype=action.dtype)
+            obs_expanded = obs
+            action_expanded = action
+        else:
+            sample_shape = (loss_samples, *action.shape)
+            eps = self.base_std * torch.randn(sample_shape, device=action.device, dtype=action.dtype)
+            t = torch.rand(
+                loss_samples,
+                *action.shape[:-1],
+                1,
+                device=action.device,
+                dtype=action.dtype,
+            )
+            obs_expanded = obs.unsqueeze(0).expand(loss_samples, *obs.shape)
+            action_expanded = action.unsqueeze(0).expand(loss_samples, *action.shape)
+
+        x_t = t * eps + (1.0 - t) * action_expanded
+        target_velocity = eps - action_expanded
+        velocity = self.velocity(obs_expanded, x_t, t)
+        loss = 0.5 * (velocity - target_velocity).pow(2).mean(dim=-1, keepdim=True)
+        if loss_samples == 1:
+            return loss
+        return loss.mean(dim=0)
+
+    def flow_log_prob_proxy(self, obs, action, loss_samples=None):
+        return -self.flow_matching_loss(obs, action, loss_samples=loss_samples)
+
+    def action_log_prob_proxy_from_noise(self, obs, action, eps):
         t = torch.rand(*action.shape[:-1], 1, device=action.device, dtype=action.dtype)
-        x_t = (1.0 - t) * z + t * action
-        target_velocity = action - z
+        x_t = t * eps + (1.0 - t) * action
+        target_velocity = eps - action
         velocity = self.velocity(obs, x_t, t)
-        return -0.5 * (velocity - target_velocity).pow(2)
+        return -0.5 * (velocity - target_velocity).pow(2).mean(dim=-1, keepdim=True)
 
 
 class PPO(nn.Module):
@@ -162,6 +205,9 @@ class PPO(nn.Module):
         flow_time_embed_dim=64,
         policy_type="gaussian",
         flow_policy_max_velocity=5.0,
+        flow_policy_base_std=0.35,
+        flow_policy_loss_samples=8,
+        flow_policy_output_scale=0.25,
     ):
         super(PPO, self).__init__()
 
@@ -219,6 +265,9 @@ class PPO(nn.Module):
                 action_dim,
                 n_embd,
                 max_velocity=flow_policy_max_velocity,
+                base_std=flow_policy_base_std,
+                loss_samples=flow_policy_loss_samples,
+                output_scale=flow_policy_output_scale,
             )
         else:
             raise ValueError(f"Unknown policy_type: {policy_type}")

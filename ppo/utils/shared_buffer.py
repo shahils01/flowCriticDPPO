@@ -85,11 +85,12 @@ class SharedReplayBuffer(object):
 
         act_shape = get_shape_from_act_space(act_space)
         print('act_shape after = ', act_shape)
+        action_log_shape = 1 if getattr(args, "policy_type", "gaussian") == "flow" else act_shape
 
         self.actions = np.zeros(
             (self.episode_length, self.n_rollout_threads, 1, act_shape), dtype=np.float32)
         self.action_log_probs = np.zeros(
-            (self.episode_length, self.n_rollout_threads, 1, act_shape), dtype=np.float32)
+            (self.episode_length, self.n_rollout_threads, 1, action_log_shape), dtype=np.float32)
 
         self.rewards = np.zeros(
             (self.episode_length, self.n_rollout_threads, 1, 1), dtype=np.float32)
