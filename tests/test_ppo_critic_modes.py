@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from ppo.algorithms.ppo.algorithm.PPO import Critic, PPO
+from ppo.algorithms.ppo.algorithm.PPO import Critic, FlowActor, PPO
 from ppo.algorithms.ppo.algorithm.ppo_policy import PPO_Policy
 from ppo.algorithms.ppo.flow_gae import FloQValueCritic, FlowFieldValueCritic, ValueFlowCritic
 
@@ -33,6 +33,8 @@ def _policy_args(lr=3e-4, critic_lr=1e-4):
         flow_max_particle_scale=2.0,
         flow_max_velocity=5.0,
         flow_time_embed_dim=8,
+        policy_type="gaussian",
+        flow_policy_max_velocity=5.0,
     )
 
 
@@ -123,3 +125,44 @@ def test_ppo_can_use_legacy_critic_by_flag():
 
     assert isinstance(model.critic, Critic)
     assert values.shape == (4, 5)
+
+
+def test_ppo_can_use_one_step_flow_policy_by_flag():
+    model = PPO(
+        obs_shape=3,
+        action_dim=2,
+        n_embd=8,
+        action_type="Continuous",
+        num_quants=5,
+        policy_type="flow",
+        flow_policy_max_velocity=2.0,
+    )
+
+    obs = torch.zeros(4, 3)
+    actions, action_log_proxy, values = model.get_actions(obs)
+    eval_log_proxy, eval_values, entropy, _ = model(obs, actions)
+    loss = -eval_log_proxy.mean()
+    loss.backward()
+
+    assert isinstance(model.actor, FlowActor)
+    assert actions.shape == (4, 2)
+    assert action_log_proxy.shape == (4, 2)
+    assert values.shape == (4, 5)
+    assert eval_log_proxy.shape == (4, 2)
+    assert eval_values.shape == (4, 5)
+    assert entropy.shape == (4, 2)
+    assert torch.isfinite(eval_log_proxy).all()
+    assert any(p.grad is not None for p in model.actor.parameters())
+
+
+def test_policy_wrapper_passes_flow_policy_type():
+    flow_args = _policy_args()
+    flow_args.policy_type = "flow"
+    flow_policy = PPO_Policy(
+        flow_args,
+        obs_space=Box((3,)),
+        act_space=Box((2,)),
+        num_quants=5,
+    )
+
+    assert isinstance(flow_policy.transformer.actor, FlowActor)

@@ -52,6 +52,7 @@ class PPO_Policy:
         self.obs_dim_ = self.obs_dim
         self.num_quants = num_quants
         self.critic_type = getattr(args, "critic_type", "direct")
+        self.policy_type = getattr(args, "policy_type", "gaussian")
 
         self.transformer = PPO(self.obs_dim, 
                                self.act_dim,
@@ -65,7 +66,9 @@ class PPO_Policy:
                                flow_particle_scale=getattr(args, "flow_particle_scale", 0.05),
                                flow_max_particle_scale=getattr(args, "flow_max_particle_scale", 2.0),
                                flow_max_velocity=getattr(args, "flow_max_velocity", 5.0),
-                               flow_time_embed_dim=getattr(args, "flow_time_embed_dim", 64))
+                               flow_time_embed_dim=getattr(args, "flow_time_embed_dim", 64),
+                               policy_type=self.policy_type,
+                               flow_policy_max_velocity=getattr(args, "flow_policy_max_velocity", 5.0))
 
         self.optimizer = torch.optim.Adam(
             [

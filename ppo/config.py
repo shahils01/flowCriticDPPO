@@ -279,6 +279,11 @@ def get_config():
     parser.add_argument("--n_head", type=int, default=1)
     parser.add_argument("--dec_actor", action='store_true', default=False)
     parser.add_argument("--share_actor", action='store_true', default=False)
+    parser.add_argument("--policy_type", type=str, default="gaussian",
+                        choices=["gaussian", "flow"],
+                        help="continuous actor policy: gaussian uses the original diagonal Gaussian, flow uses a one-step conditional flow with an FPO-style loss-ratio proxy")
+    parser.add_argument("--flow_policy_max_velocity", type=float, default=5.0,
+                        help="tanh-clipped vector-field velocity bound for policy_type=flow")
 
     # add for online multi-task
     parser.add_argument("--train_maps", type=str, nargs='+', default=None)

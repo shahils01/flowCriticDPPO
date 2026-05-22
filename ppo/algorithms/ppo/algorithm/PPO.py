@@ -88,6 +88,61 @@ class Actor(nn.Module):
         return logit
 
 
+class FlowActor(nn.Module):
+    """
+    One-step conditional flow policy for continuous actions.
+
+    The policy samples z ~ N(0, I) and takes one Euler step
+    a = z + v_theta(z, t=0, obs). For PPO updates, it returns the
+    FPO-style log-ratio proxy -L_CFM(a | obs), where the conditional
+    flow-matching target is a - z at x_t = (1 - t) z + t a.
+    """
+
+    def __init__(self, obs_shape, action_dim, n_embd, max_velocity=5.0):
+        super(FlowActor, self).__init__()
+
+        self.action_dim = action_dim
+        self.max_velocity = max_velocity
+
+        self.net = nn.Sequential(
+            nn.LayerNorm(obs_shape + action_dim + 1),
+            init_(nn.Linear(obs_shape + action_dim + 1, n_embd), activate=True),
+            nn.GELU(),
+            nn.LayerNorm(n_embd),
+            init_(nn.Linear(n_embd, n_embd), activate=True),
+            nn.GELU(),
+            nn.LayerNorm(n_embd),
+            init_(nn.Linear(n_embd, action_dim)),
+        )
+
+    def velocity(self, obs, x_t, t):
+        if t.ndim == 1:
+            t = t.unsqueeze(-1)
+        if t.shape[:-1] != x_t.shape[:-1]:
+            t = t.expand(*x_t.shape[:-1], 1)
+
+        h = torch.cat([obs, x_t, t], dim=-1)
+        v = self.net(h)
+        if self.max_velocity is not None and self.max_velocity > 0:
+            v = self.max_velocity * torch.tanh(v / self.max_velocity)
+        return v
+
+    def sample(self, obs, deterministic=False):
+        z = torch.zeros(*obs.shape[:-1], self.action_dim, device=obs.device, dtype=obs.dtype)
+        if not deterministic:
+            z = torch.randn_like(z)
+        t0 = torch.zeros(*obs.shape[:-1], 1, device=obs.device, dtype=obs.dtype)
+        return z + self.velocity(obs, z, t0)
+
+    def flow_log_prob_proxy(self, obs, action):
+        z = torch.randn_like(action)
+        t = torch.rand(*action.shape[:-1], 1, device=action.device, dtype=action.dtype)
+        x_t = (1.0 - t) * z + t * action
+        target_velocity = action - z
+        velocity = self.velocity(obs, x_t, t)
+        return -0.5 * (velocity - target_velocity).pow(2)
+
+
 class PPO(nn.Module):
 
     def __init__(
@@ -105,12 +160,15 @@ class PPO(nn.Module):
         flow_max_particle_scale=2.0,
         flow_max_velocity=5.0,
         flow_time_embed_dim=64,
+        policy_type="gaussian",
+        flow_policy_max_velocity=5.0,
     ):
         super(PPO, self).__init__()
 
         self.action_dim = action_dim
         self.tpdv = dict(dtype=torch.float32, device=device)
         self.action_type = action_type
+        self.policy_type = policy_type
         self.device = device
         self.n_embd = n_embd
         self.obs_shape = obs_shape
@@ -151,14 +209,26 @@ class PPO(nn.Module):
             self.register_buffer("critic_particles", make_standard_normal_particles(num_quants, device))
         else:
             raise ValueError(f"Unknown critic_type: {critic_type}")
-        self.actor = Actor(obs_shape, action_dim, n_embd, device, self.action_type)
+        if self.action_type == "Discrete" and self.policy_type != "gaussian":
+            raise ValueError("Flow policies are only supported for continuous action spaces")
+        if self.policy_type == "gaussian":
+            self.actor = Actor(obs_shape, action_dim, n_embd, device, self.action_type)
+        elif self.policy_type == "flow":
+            self.actor = FlowActor(
+                obs_shape,
+                action_dim,
+                n_embd,
+                max_velocity=flow_policy_max_velocity,
+            )
+        else:
+            raise ValueError(f"Unknown policy_type: {policy_type}")
 
         # self.value_entropy_weight = torch.nn.Parameter(torch.ones(1)/2)
    
         self.to(device)
 
     def zero_std(self):
-        if self.action_type != 'Discrete':
+        if self.action_type != 'Discrete' and self.policy_type == "gaussian":
             self.actor.zero_std(self.device)
 
     def critic_values(self, obs):
@@ -185,8 +255,11 @@ class PPO(nn.Module):
         if self.action_type == 'Discrete':
             action = action.long()
             action_log, entropy = discrete_parallel_act(self.actor, obs, action, batch_size, self.action_dim, self.tpdv)
-        else:
+        elif self.policy_type == "gaussian":
             action_log, entropy = continuous_parallel_act(self.actor, obs, action, batch_size, self.action_dim, self.tpdv)
+        else:
+            action_log = self.actor.flow_log_prob_proxy(obs, action)
+            entropy = torch.zeros_like(action_log)
 
         return action_log, v_loc, entropy, gate_entropy
 
@@ -198,8 +271,11 @@ class PPO(nn.Module):
         
         if self.action_type == "Discrete":
             output_action, output_action_log = discrete_decentralized_act(self.actor, obs, batch_size, self.action_dim, self.tpdv)
-        else:
+        elif self.policy_type == "gaussian":
             output_action, output_action_log = continuous_autoregreesive_act(self.actor, obs, batch_size, self.action_dim, self.tpdv)
+        else:
+            output_action = self.actor.sample(obs)
+            output_action_log = self.actor.flow_log_prob_proxy(obs, output_action)
 
         return output_action, output_action_log, v_loc
 
