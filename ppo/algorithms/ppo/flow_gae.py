@@ -447,7 +447,85 @@ def spectral_td_residual(
     return (weights * td_particles).mean(dim=-1, keepdim=True)
 
 
-def terminal_map_entropy(value_particles, z, eps=1e-6):
+def _base_grid_entropy(z, eps):
+    dz = z[..., 1:] - z[..., :-1]
+    if torch.any(dz == 0):
+        raise ValueError("z particles must be distinct")
+
+    base_width = (z[..., -1:] - z[..., :1]).abs() + dz.abs().mean(
+        dim=-1, keepdim=True
+    )
+    return base_width.clamp_min(eps).log()
+
+
+def terminal_map_entropy_autograd(value_particles, z, eps=1e-6, create_graph=True):
+    """
+    Estimate terminal-map entropy using autograd for dT(s, z) / dz.
+
+    ``value_particles`` must be the output of a differentiable map evaluated at
+    ``z``. For batched value particles, pass a batched ``z`` tensor with the same
+    leading dimensions so each sample has independent particle inputs.
+    """
+    if not torch.is_tensor(value_particles):
+        raise TypeError("value_particles must be a tensor for autograd entropy")
+    if not torch.is_tensor(z):
+        raise TypeError("z must be the tensor used to produce value_particles")
+    if value_particles.shape != z.shape:
+        raise ValueError(
+            "autograd entropy requires z to have the same shape as value_particles: "
+            f"got {tuple(z.shape)} and {tuple(value_particles.shape)}"
+        )
+    if z.shape[-1] < 2:
+        return torch.zeros_like(value_particles[..., :1])
+    if not z.requires_grad:
+        raise ValueError("z must require gradients for autograd entropy")
+    if not value_particles.requires_grad:
+        raise ValueError("value_particles must require gradients for autograd entropy")
+
+    jacobian_diag = []
+    for particle_idx in range(value_particles.shape[-1]):
+        grad = torch.autograd.grad(
+            value_particles[..., particle_idx].sum(),
+            z,
+            retain_graph=True,
+            create_graph=create_graph,
+            allow_unused=True,
+        )[0]
+        if grad is None:
+            grad = torch.zeros_like(z)
+        jacobian_diag.append(grad[..., particle_idx])
+    jacobian_diag = torch.stack(jacobian_diag, dim=-1)
+
+    log_abs_jacobian = jacobian_diag.abs().clamp_min(eps).log().mean(
+        dim=-1, keepdim=True
+    )
+    return _base_grid_entropy(z, eps) + log_abs_jacobian
+
+
+def terminal_map_entropy_from_transport(
+    transport_map, states, z, eps=1e-6, create_graph=True
+):
+    """
+    Evaluate ``transport_map(states, z)`` and estimate entropy with autograd.
+
+    This helper expands a shared one-dimensional particle grid into independent
+    per-sample inputs before differentiating, which avoids summing Jacobians
+    across the batch when the same shared z tensor is reused for every state.
+    """
+    states = torch.as_tensor(states)
+    z = torch.as_tensor(z, dtype=states.dtype, device=states.device)
+    if z.dim() != 1:
+        raise ValueError("z must be a one-dimensional particle grid")
+
+    batch_shape = states.shape[:-1]
+    z_batch = z.expand(*batch_shape, z.numel()).clone().detach().requires_grad_(True)
+    value_particles = transport_map(states, z_batch)
+    return terminal_map_entropy_autograd(
+        value_particles, z_batch, eps=eps, create_graph=create_graph
+    )
+
+
+def terminal_map_entropy(value_particles, z, eps=1e-6, jacobian_mode="finite_difference"):
     """
     Estimate entropy of the terminal one-dimensional value-flow distribution.
 
@@ -455,8 +533,15 @@ def terminal_map_entropy(value_particles, z, eps=1e-6):
     change-of-variables approximation:
         H[T(s, Z)] ~= H[Z] + E_z log |dT(s, z) / dz|.
 
-    The derivative is estimated with finite differences over adjacent particles.
+    By default, the derivative is estimated with finite differences over adjacent
+    particles. Set ``jacobian_mode="autograd"`` when ``value_particles`` was
+    produced from a same-shaped differentiable ``z`` tensor.
     """
+    if jacobian_mode == "autograd":
+        return terminal_map_entropy_autograd(value_particles, z, eps=eps)
+    if jacobian_mode != "finite_difference":
+        raise ValueError("jacobian_mode must be 'finite_difference' or 'autograd'")
+
     value_particles = torch.as_tensor(value_particles)
     z = torch.as_tensor(z, dtype=value_particles.dtype, device=value_particles.device)
     if z.dim() != 1:
@@ -470,14 +555,10 @@ def terminal_map_entropy(value_particles, z, eps=1e-6):
         )
 
     dz = z[1:] - z[:-1]
-    if torch.any(dz == 0):
-        raise ValueError("z particles must be distinct")
-
+    base_entropy = _base_grid_entropy(z, eps)
     slopes = (value_particles[..., 1:] - value_particles[..., :-1]) / dz
     log_abs_jacobian = slopes.abs().clamp_min(eps).log().mean(dim=-1, keepdim=True)
 
-    base_width = (z[-1] - z[0]).abs() + dz.abs().mean()
-    base_entropy = base_width.clamp_min(eps).log()
     return base_entropy + log_abs_jacobian
 
 
@@ -496,6 +577,7 @@ def compute_flow_gae(
     entropy_beta=0.0,
     entropy_delta_mode="bellman",
     entropy_eps=1e-6,
+    entropy_jacobian_mode="finite_difference",
 ):
     """
     Compute spectral GAE by backward recursion:
@@ -524,8 +606,18 @@ def compute_flow_gae(
         weights=weights,
     )
     if entropy_beta != 0.0:
-        current_entropy = terminal_map_entropy(current_particles, z, eps=entropy_eps)
-        next_entropy = terminal_map_entropy(next_particles, z, eps=entropy_eps)
+        current_entropy = terminal_map_entropy(
+            current_particles,
+            z,
+            eps=entropy_eps,
+            jacobian_mode=entropy_jacobian_mode,
+        )
+        next_entropy = terminal_map_entropy(
+            next_particles,
+            z,
+            eps=entropy_eps,
+            jacobian_mode=entropy_jacobian_mode,
+        )
         if entropy_delta_mode == "bellman":
             entropy_delta = gamma * masks * next_entropy - current_entropy
         elif entropy_delta_mode == "difference":

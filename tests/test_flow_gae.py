@@ -8,6 +8,8 @@ from ppo.algorithms.ppo.flow_gae import (
     make_uniform_particles,
     normal_cdf,
     terminal_map_entropy,
+    terminal_map_entropy_autograd,
+    terminal_map_entropy_from_transport,
     quantile_weight,
     spectral_td_residual,
 )
@@ -106,6 +108,31 @@ def test_terminal_map_entropy_matches_linear_uniform_flow():
     entropy = terminal_map_entropy(values, z)
 
     expected = torch.full((2, 1), torch.log(torch.tensor(2.0 * scale)))
+    assert torch.allclose(entropy, expected)
+
+
+def test_terminal_map_entropy_autograd_matches_linear_uniform_flow():
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+    z = z.expand(2, 4).clone().requires_grad_(True)
+    scale = torch.tensor([[3.0], [0.5]])
+    values = scale * z
+
+    entropy = terminal_map_entropy_autograd(values, z)
+
+    expected = torch.log(2.0 * scale)
+    assert torch.allclose(entropy, expected)
+
+
+def test_terminal_map_entropy_from_transport_uses_per_sample_jacobian():
+    states = torch.tensor([[3.0], [0.5]])
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+
+    def transport_map(states, z):
+        return states * z
+
+    entropy = terminal_map_entropy_from_transport(transport_map, states, z)
+
+    expected = torch.log(2.0 * states)
     assert torch.allclose(entropy, expected)
 
 
