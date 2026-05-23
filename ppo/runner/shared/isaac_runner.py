@@ -46,7 +46,7 @@ class IsaacRunner(Runner):
 
             for step in range(self.episode_length):
                 # Sample actions
-                values, actions, action_log_probs = self.collect(step)
+                values, value_entropy, actions, action_log_probs = self.collect(step)
 
                 # Obser reward and next obs
                 obs, rewards, terminated, truncated, infos = self.envs.step(actions)
@@ -69,7 +69,7 @@ class IsaacRunner(Runner):
                 rewards += self.all_args.gamma * np.mean(values, axis=-1,keepdims=True) * truncated
 
                 data = obs, rewards, dones, infos, \
-                       values, actions, action_log_probs
+                       values, value_entropy, actions, action_log_probs
                 # insert data into buffer
                 self.insert(data)
 
@@ -133,19 +133,28 @@ class IsaacRunner(Runner):
     @torch.no_grad()
     def collect(self, step):
         self.trainer.prep_rollout()
-        value, actions, action_log_prob \
-            = self.trainer.policy.get_actions(self.buffer.get_step_obs(step),
-                                            np.concatenate(self.buffer.masks[step]))
+        if getattr(self.all_args, "flow_entropy_beta", 0.0) != 0.0:
+            value, value_entropy, actions, action_log_prob \
+                = self.trainer.policy.get_actions_with_value_entropy(
+                    self.buffer.get_step_obs(step),
+                    np.concatenate(self.buffer.masks[step]),
+                )
+            value_entropy = _t2n(value_entropy)
+        else:
+            value, actions, action_log_prob \
+                = self.trainer.policy.get_actions(self.buffer.get_step_obs(step),
+                                                np.concatenate(self.buffer.masks[step]))
+            value_entropy = None
                 
         values = _t2n(value)
         # actions = _t2n(action)
         action_log_probs = _t2n(action_log_prob)
         
-        return values, actions, action_log_probs
+        return values, value_entropy, actions, action_log_probs
 
     def insert(self, data):
         obs, rewards, dones, infos, \
-        values, actions, action_log_probs  = data
+        values, value_entropy, actions, action_log_probs  = data
 
         dones_env = np.all(dones, axis=1)
 
@@ -156,7 +165,16 @@ class IsaacRunner(Runner):
         active_masks[dones.reshape(-1) == True] = np.zeros(((dones == True).sum(), 1), dtype=np.float32)
         active_masks[dones_env == True] = np.ones(((dones_env == True).sum(), 1), dtype=np.float32)
 
-        self.buffer.insert(obs, actions, action_log_probs, values, rewards, masks, active_masks)
+        self.buffer.insert(
+            obs,
+            actions,
+            action_log_probs,
+            values,
+            rewards,
+            masks,
+            active_masks=active_masks,
+            value_entropy=value_entropy,
+        )
 
     def log_train(self, train_infos, total_num_steps):
         train_infos["average_step_rewards"] = np.mean(self.buffer.rewards)

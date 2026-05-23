@@ -16,6 +16,7 @@ from ppo.algorithms.ppo.flow_gae import (
     ValueFlowCritic,
     make_standard_normal_particles,
     make_uniform_particles,
+    terminal_map_entropy_autograd,
 )
 
 
@@ -285,6 +286,24 @@ class PPO(nn.Module):
             return self.critic(obs, self.critic_particles)
         return self.critic(obs)
 
+    def critic_values_and_entropy(self, obs, create_graph=False):
+        if self.critic_type not in {"direct", "flow_field", "floq"}:
+            values = self.critic_values(obs)
+            entropy = torch.zeros_like(values[..., :1])
+            return values, entropy
+
+        with torch.enable_grad():
+            particle_shape = (*obs.shape[:-1], self.critic_particles.numel())
+            z = self.critic_particles.expand(particle_shape).clone().detach()
+            z = z.requires_grad_(True)
+            values = self.critic(obs, z)
+            entropy = terminal_map_entropy_autograd(
+                values,
+                z,
+                create_graph=create_graph,
+            )
+        return values, entropy
+
     def critic_flow_matching_loss(self, obs, returns):
         if self.critic_type != "floq":
             raise RuntimeError("critic_flow_matching_loss is only available for critic_type='floq'")
@@ -332,3 +351,7 @@ class PPO(nn.Module):
         obs = _to_tpdv(check(obs), self.tpdv)
         v_tot = self.critic_values(obs)
         return v_tot
+
+    def get_values_and_entropy(self, obs):
+        obs = _to_tpdv(check(obs), self.tpdv)
+        return self.critic_values_and_entropy(obs, create_graph=False)

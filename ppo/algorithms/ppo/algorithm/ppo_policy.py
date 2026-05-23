@@ -131,6 +131,21 @@ class PPO_Policy:
     
         return values, actions, action_log_probs
 
+    def get_actions_with_value_entropy(self, obs, masks):
+        if isinstance(self.obs_shape, dict):
+            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
+        else:
+            obs = obs.reshape(-1, *self.obs_shape)
+
+        actions, action_log_probs, values = self.transformer.get_actions(obs)
+        _, value_entropy = self.transformer.get_values_and_entropy(obs)
+        actions = actions.view(-1, self.act_num)
+        action_log_probs = action_log_probs.view(-1, self.action_log_num)
+        values = values.view(-1, self.num_quants)
+        value_entropy = value_entropy.view(-1, 1)
+
+        return values, value_entropy, actions, action_log_probs
+
     def get_values(self, obs, masks):
         """
         Get value function predictions.
@@ -149,6 +164,18 @@ class PPO_Policy:
         values = values.view(-1, self.num_quants)
 
         return values
+
+    def get_values_and_entropy(self, obs, masks):
+        if isinstance(self.obs_shape, dict):
+            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
+        else:
+            obs = obs.reshape(-1, *self.obs_shape)
+
+        values, value_entropy = self.transformer.get_values_and_entropy(obs)
+        values = values.view(-1, self.num_quants)
+        value_entropy = value_entropy.view(-1, 1)
+
+        return values, value_entropy
 
     def evaluate_actions(self, obs, actions, masks, active_masks=None):
         """

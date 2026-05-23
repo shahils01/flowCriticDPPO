@@ -123,6 +123,17 @@ def test_terminal_map_entropy_autograd_matches_linear_uniform_flow():
     assert torch.allclose(entropy, expected)
 
 
+def test_terminal_map_entropy_autograd_mode_falls_back_for_detached_grid():
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+    scale = 3.0
+    values = scale * z.reshape(1, 1, 4)
+
+    entropy = terminal_map_entropy(values, z, jacobian_mode="autograd")
+
+    expected = torch.full((1, 1, 1), torch.log(torch.tensor(2.0 * scale)))
+    assert torch.allclose(entropy, expected)
+
+
 def test_terminal_map_entropy_from_transport_uses_per_sample_jacobian():
     states = torch.tensor([[3.0], [0.5]])
     z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
@@ -157,6 +168,32 @@ def test_compute_flow_gae_can_add_bellman_entropy_delta():
     expected_entropy_delta = torch.log(torch.tensor(4.0)) - torch.log(torch.tensor(2.0))
     expected = expected_drift + 0.5 * expected_entropy_delta
 
+    assert torch.allclose(advantages, expected)
+
+
+def test_compute_flow_gae_uses_precomputed_entropy_when_provided():
+    z = torch.tensor([-0.75, -0.25, 0.25, 0.75])
+    rewards = torch.zeros(1, 1, 1)
+    current = z.reshape(1, 1, 4)
+    next_values = z.reshape(1, 1, 4)
+    current_entropy = torch.tensor([[[1.0]]])
+    next_entropy = torch.tensor([[[3.0]]])
+
+    advantages = compute_flow_gae(
+        rewards=rewards,
+        current_particles=current,
+        next_particles=next_values,
+        z=z,
+        gamma=1.0,
+        gae_lambda=1.0,
+        mode="uniform",
+        entropy_beta=0.5,
+        current_entropy=current_entropy,
+        next_entropy=next_entropy,
+        entropy_jacobian_mode="strict_autograd",
+    )
+
+    expected = torch.full((1, 1, 1), 1.0)
     assert torch.allclose(advantages, expected)
 
 

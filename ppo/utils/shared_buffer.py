@@ -80,6 +80,9 @@ class SharedReplayBuffer(object):
         self.value_preds = np.zeros(
             (self.episode_length + 1, self.n_rollout_threads, 1, self.num_quants), dtype=np.float32)
         self.returns = np.zeros_like(self.value_preds)
+        self.value_entropies = np.zeros(
+            (self.episode_length + 1, self.n_rollout_threads, 1, 1), dtype=np.float32)
+        self.has_value_entropies = False
         self.advantages = np.zeros(
             (self.episode_length, self.n_rollout_threads, 1, 1), dtype=np.float32)
 
@@ -112,7 +115,7 @@ class SharedReplayBuffer(object):
         if self.num_quants > 1:
             self.quantile_spacing = 1.0 / (self.num_quants - 1)
 
-    def insert(self, obs, actions, action_log_probs, value_preds, rewards, masks, bad_masks=None, active_masks=None):
+    def insert(self, obs, actions, action_log_probs, value_preds, rewards, masks, bad_masks=None, active_masks=None, value_entropy=None):
         """
         Insert data into the buffer.
         :param share_obs: (argparse.Namespace) arguments containing relevant model, policy, and env information.
@@ -136,6 +139,9 @@ class SharedReplayBuffer(object):
         self.actions[self.step] = np.expand_dims(actions, axis=1).copy()
         self.action_log_probs[self.step] = np.expand_dims(action_log_probs, axis=1).copy()
         self.value_preds[self.step] = np.expand_dims(value_preds, axis=1).copy()
+        if value_entropy is not None:
+            self.value_entropies[self.step] = np.expand_dims(value_entropy, axis=1).copy()
+            self.has_value_entropies = True
         self.rewards[self.step] = np.expand_dims(rewards, axis=1).copy()
         self.masks[self.step + 1] = np.expand_dims(masks, axis=1).copy()
         if bad_masks is not None:
@@ -155,19 +161,24 @@ class SharedReplayBuffer(object):
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
         self.active_masks[0] = self.active_masks[-1].copy()
+        self.value_entropies[0] = self.value_entropies[-1].copy()
+        self.has_value_entropies = False
 
     def chooseafter_update(self):
         """Copy last timestep data to first index. This method is used for Hanabi."""
         self.masks[0] = self.masks[-1].copy()
         self.bad_masks[0] = self.bad_masks[-1].copy()
 
-    def compute_returns(self, next_value, value_normalizer=None, flow_weight_mode="uniform"):
+    def compute_returns(self, next_value, value_normalizer=None, flow_weight_mode="uniform", next_value_entropy=None):
         """
         Compute returns either as discounted sum of rewards, or using GAE.
         :param next_value: (np.ndarray) value predictions for the step after the last episode step.
         :param value_normalizer: (PopArt) If not None, PopArt value normalizer instance.
         """
         self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
+        if next_value_entropy is not None:
+            self.value_entropies[-1] = np.expand_dims(next_value_entropy, axis=1).copy()
+            self.has_value_entropies = True
         if self.critic_type in {"direct", "flow_field", "floq"}:
             self.compute_flow_returns(value_normalizer, flow_weight_mode)
             return
@@ -214,6 +225,16 @@ class SharedReplayBuffer(object):
         current_particles = value_particles[:-1]
         next_particles = value_particles[1:]
         masks = self.masks[1:]
+        current_entropy = None
+        next_entropy = None
+        if self.flow_entropy_beta != 0.0 and not self.has_value_entropies:
+            raise RuntimeError(
+                "flow entropy is enabled, but no critic-side value entropies were "
+                "stored in the buffer"
+            )
+        if self.has_value_entropies:
+            current_entropy = self.value_entropies[:-1]
+            next_entropy = self.value_entropies[1:]
 
         if self.critic_type == "floq":
             z = make_uniform_particles(self.num_quants, torch.device("cpu"))
@@ -233,6 +254,8 @@ class SharedReplayBuffer(object):
             entropy_beta=self.flow_entropy_beta,
             entropy_delta_mode=self.flow_entropy_delta_mode,
             entropy_eps=self.flow_entropy_eps,
+            current_entropy=current_entropy,
+            next_entropy=next_entropy,
         ).detach().cpu().numpy()
 
         self.advantages[:] = advantages

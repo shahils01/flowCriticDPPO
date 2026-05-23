@@ -525,7 +525,17 @@ def terminal_map_entropy_from_transport(
     )
 
 
-def terminal_map_entropy(value_particles, z, eps=1e-6, jacobian_mode="finite_difference"):
+def _can_use_autograd_entropy(value_particles, z):
+    return (
+        torch.is_tensor(value_particles)
+        and torch.is_tensor(z)
+        and value_particles.shape == z.shape
+        and value_particles.requires_grad
+        and z.requires_grad
+    )
+
+
+def terminal_map_entropy(value_particles, z, eps=1e-6, jacobian_mode="auto"):
     """
     Estimate entropy of the terminal one-dimensional value-flow distribution.
 
@@ -533,14 +543,22 @@ def terminal_map_entropy(value_particles, z, eps=1e-6, jacobian_mode="finite_dif
     change-of-variables approximation:
         H[T(s, Z)] ~= H[Z] + E_z log |dT(s, z) / dz|.
 
-    By default, the derivative is estimated with finite differences over adjacent
-    particles. Set ``jacobian_mode="autograd"`` when ``value_particles`` was
-    produced from a same-shaped differentiable ``z`` tensor.
+    ``jacobian_mode="auto"`` uses autograd when ``value_particles`` was produced
+    from a same-shaped differentiable ``z`` tensor, and otherwise falls back to
+    finite differences. Use ``jacobian_mode="strict_autograd"`` to raise instead
+    of falling back when autograd is unavailable.
     """
-    if jacobian_mode == "autograd":
+    if jacobian_mode == "strict_autograd":
         return terminal_map_entropy_autograd(value_particles, z, eps=eps)
-    if jacobian_mode != "finite_difference":
-        raise ValueError("jacobian_mode must be 'finite_difference' or 'autograd'")
+    if jacobian_mode in {"auto", "autograd"} and _can_use_autograd_entropy(
+        value_particles, z
+    ):
+        return terminal_map_entropy_autograd(value_particles, z, eps=eps)
+    if jacobian_mode not in {"auto", "autograd", "finite_difference"}:
+        raise ValueError(
+            "jacobian_mode must be 'auto', 'finite_difference', 'autograd', "
+            "or 'strict_autograd'"
+        )
 
     value_particles = torch.as_tensor(value_particles)
     z = torch.as_tensor(z, dtype=value_particles.dtype, device=value_particles.device)
@@ -577,7 +595,9 @@ def compute_flow_gae(
     entropy_beta=0.0,
     entropy_delta_mode="bellman",
     entropy_eps=1e-6,
-    entropy_jacobian_mode="finite_difference",
+    entropy_jacobian_mode="auto",
+    current_entropy=None,
+    next_entropy=None,
 ):
     """
     Compute spectral GAE by backward recursion:
@@ -606,18 +626,32 @@ def compute_flow_gae(
         weights=weights,
     )
     if entropy_beta != 0.0:
-        current_entropy = terminal_map_entropy(
-            current_particles,
-            z,
-            eps=entropy_eps,
-            jacobian_mode=entropy_jacobian_mode,
-        )
-        next_entropy = terminal_map_entropy(
-            next_particles,
-            z,
-            eps=entropy_eps,
-            jacobian_mode=entropy_jacobian_mode,
-        )
+        if current_entropy is None:
+            current_entropy = terminal_map_entropy(
+                current_particles,
+                z,
+                eps=entropy_eps,
+                jacobian_mode=entropy_jacobian_mode,
+            )
+        else:
+            current_entropy = torch.as_tensor(
+                current_entropy,
+                dtype=current_particles.dtype,
+                device=current_particles.device,
+            )
+        if next_entropy is None:
+            next_entropy = terminal_map_entropy(
+                next_particles,
+                z,
+                eps=entropy_eps,
+                jacobian_mode=entropy_jacobian_mode,
+            )
+        else:
+            next_entropy = torch.as_tensor(
+                next_entropy,
+                dtype=current_particles.dtype,
+                device=current_particles.device,
+            )
         if entropy_delta_mode == "bellman":
             entropy_delta = gamma * masks * next_entropy - current_entropy
         elif entropy_delta_mode == "difference":

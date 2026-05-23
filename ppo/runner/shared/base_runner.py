@@ -125,12 +125,25 @@ class Runner(object):
     def compute(self, flow_weight_mode="uniform"):
         """Calculate returns for the collected data."""
         self.trainer.prep_rollout()
-        next_values = self.trainer.policy.get_values(self.buffer.get_step_obs(-1),
-                                                     np.concatenate(self.buffer.masks[-1]))
+        if getattr(self.all_args, "flow_entropy_beta", 0.0) != 0.0:
+            next_values, next_value_entropy = self.trainer.policy.get_values_and_entropy(
+                self.buffer.get_step_obs(-1),
+                np.concatenate(self.buffer.masks[-1]),
+            )
+            next_value_entropy = _t2n(next_value_entropy)
+        else:
+            next_values = self.trainer.policy.get_values(self.buffer.get_step_obs(-1),
+                                                         np.concatenate(self.buffer.masks[-1]))
+            next_value_entropy = None
         
         next_values = _t2n(next_values)
         # next_values = next_values.reshape(self.n_rollout_threads, -1)
-        self.buffer.compute_returns(next_values, self.trainer.value_normalizer, flow_weight_mode)
+        self.buffer.compute_returns(
+            next_values,
+            self.trainer.value_normalizer,
+            flow_weight_mode,
+            next_value_entropy=next_value_entropy,
+        )
     
     def train(self):
         """Train policies with data in buffer. """
