@@ -21,9 +21,9 @@ python train/train_mujoco.py \
  --max_grad_norm 1.0 \
  --eval_episodes 2 \
  --n_training_threads 32 \
- --n_rollout_threads 64 \
+ --n_rollout_threads 256 \
  --num_mini_batch 1 \
- --episode_length 2048 \
+ --episode_length 100 \
  --eval_interval 25 \
  --num_env_steps 200000000 \
  --ppo_epoch 20 \
@@ -40,10 +40,10 @@ python train/train_mujoco.py \
  --flow_policy_output_scale 0.25 \
  --critic_type floq \
  --flow_integrator euler \
- --num_flow_steps 8 \
+ --num_flow_steps 16 \
  --flow_particle_scale 0.25 \
  --flow_time_embed_dim 64 \
- --flow_max_velocity 5.0 \
+ --flow_max_velocity 15.0 \
  --flow_entropy_beta 0.1 \
  --flow_entropy_delta_mode bellman \
  --flow_weight_mode uniform \

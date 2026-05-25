@@ -663,9 +663,11 @@ def compute_flow_gae(
         deltas = deltas + entropy_beta * entropy_delta
 
     advantages = torch.zeros_like(deltas)
+    returns = torch.zeros_like(current_particles)
     gae = torch.zeros_like(deltas[-1])
     for step in reversed(range(deltas.shape[0])):
         gae = deltas[step] + gamma * gae_lambda * masks[step] * gae
-        advantages[step] = gae
+        advantages[step] = (gae - gae.mean()) / (gae.std() + 1e-8) #gae
+        returns[step] = gae + current_particles[step]
 
-    return advantages
+    return advantages.detach().cpu().numpy(), returns.detach().cpu().numpy()

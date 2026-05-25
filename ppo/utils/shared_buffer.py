@@ -240,7 +240,7 @@ class SharedReplayBuffer(object):
             z = make_uniform_particles(self.num_quants, torch.device("cpu"))
         else:
             z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
-        advantages = compute_flow_gae(
+        advantages, returns = compute_flow_gae(
             rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
             current_particles=torch.as_tensor(current_particles, dtype=torch.float32),
             next_particles=torch.as_tensor(next_particles, dtype=torch.float32),
@@ -256,10 +256,11 @@ class SharedReplayBuffer(object):
             entropy_eps=self.flow_entropy_eps,
             current_entropy=current_entropy,
             next_entropy=next_entropy,
-        ).detach().cpu().numpy()
+        )#.detach().cpu().numpy()
 
         self.advantages[:] = advantages
-        self.returns[:-1] = self.rewards + self.gamma * masks * next_particles
+        self.returns[:-1] = returns
+        # self.returns[:-1] = self.rewards + self.gamma * masks * next_particles
 
     def compute_scalar_flow_gae_returns(self, value_normalizer=None):
         value_particles = self.get_denormalized_value_particles(value_normalizer)
