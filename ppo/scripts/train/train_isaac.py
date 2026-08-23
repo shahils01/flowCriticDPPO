@@ -5,9 +5,12 @@ import argparse
 import sys
 import os
 import socket
-import wandb
-import setproctitle
 from pathlib import Path
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 # --- Isaac Lab Launch ---
 from isaaclab.app import AppLauncher
@@ -29,23 +32,24 @@ app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
 # --- Imports after launch ---
-import gymnasium as gym
-import torch
-import isaaclab.envs
-from isaaclab_tasks.utils import parse_env_cfg
+import gymnasium as gym  # noqa: E402
+import torch  # noqa: E402
+import isaaclab.envs  # noqa: E402,F401
+from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
 
-import dppo
+import dppo  # noqa: E402,F401  # Registers the custom Isaac tasks.
 
-sys.path.append("../../")
-from ppo.config import get_config
-from ppo.envs.isaac_wrapper import IsaacLabVecEnvWrapper
-from ppo.runner.shared.isaac_runner import IsaacRunner as Runner
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+from ppo.config import get_config  # noqa: E402
+from ppo.envs.isaac_wrapper import IsaacLabVecEnvWrapper  # noqa: E402
+from ppo.runner.shared.isaac_runner import IsaacRunner as Runner  # noqa: E402
 
 # 3. UPDATE PARSE_ARGS TO ACCEPT THE 'EXTRAS' LIST
 def parse_ppo_args(extra_args, parser):
     parser.add_argument('--scenario', type=str, default='Isaac-Ant-v0', help="Which task to run on")
     # Parse the remaining arguments known to the PPO config
-    all_args = parser.parse_known_args(extra_args)[0]
+    all_args = parser.parse_args(extra_args)
     return all_args
 
 def main(ppo_args_list):
@@ -55,7 +59,7 @@ def main(ppo_args_list):
     # Pass the 'extras' list we caught earlier
     all_args = parse_ppo_args(ppo_args_list, parser)
     
-    print("mumu config: ", all_args)
+    print("training config: ", all_args)
 
     # 1. Configure the Environment
     # Note: You were using args_cli.task in gym.make, but all_args.scenario in parse_env_cfg.
@@ -73,17 +77,22 @@ def main(ppo_args_list):
 
     # Create run directory
     run_dir = Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[
-                       0] + "/results") / all_args.env_name / all_args.scenario / all_args.algorithm_name
+                       0] + "/results") / all_args.env_name / all_args.scenario / all_args.value_method
     if not run_dir.exists():
         os.makedirs(str(run_dir))
 
     if all_args.use_wandb:
+        if wandb is None:
+            raise ImportError(
+                "Weights & Biases is not installed; install wandb or set --use_wandb false"
+            )
         run = wandb.init(config=all_args,
                          project=all_args.scenario,
                          entity=all_args.user_name,
                          notes=socket.gethostname(),
-                         name=str(all_args.algorithm_name) + "_seed_" + str(all_args.seed),
-                         group='DistPPO',
+                         name=all_args.wandb_name or
+                              f"{all_args.value_method}_seed_{all_args.seed}",
+                         group='clean-dppo',
                          dir=str(run_dir),
                          job_type="training",
                          reinit=True)
@@ -112,6 +121,11 @@ def main(ppo_args_list):
     runner.run()
 
     env.close()
+    if all_args.use_wandb:
+        run.finish()
+    else:
+        runner.writer.flush()
+        runner.writer.close()
     simulation_app.close()
 
 if __name__ == "__main__":

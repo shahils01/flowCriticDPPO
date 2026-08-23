@@ -2,9 +2,13 @@ from types import SimpleNamespace
 
 import torch
 
-from ppo.algorithms.ppo.algorithm.PPO import Critic, FlowActor, PPO
+from ppo.algorithms.ppo.algorithm.PPO import Actor, PPO
 from ppo.algorithms.ppo.algorithm.ppo_policy import PPO_Policy
-from ppo.algorithms.ppo.flow_gae import FloQValueCritic, FlowFieldValueCritic, ValueFlowCritic
+from ppo.algorithms.ppo.value_critics import (
+    FlowMatchingValueCritic,
+    QuantileValueCritic,
+    ScalarValueCritic,
+)
 
 
 class Box:
@@ -17,155 +21,113 @@ class Discrete:
         self.n = n
 
 
-def _policy_args(lr=3e-4, critic_lr=1e-4):
+def _policy_args(value_method="scalar", lr=3e-4, critic_lr=1e-4):
     return SimpleNamespace(
-        algorithm_name="ppo",
         lr=lr,
         critic_lr=critic_lr,
         opti_eps=1e-5,
         weight_decay=0.0,
         use_policy_active_masks=True,
         n_embd=8,
-        critic_type="flow_field",
+        value_method=value_method,
+        num_value_particles=5,
         num_flow_steps=2,
         flow_integrator="euler",
-        flow_particle_scale=0.05,
-        flow_max_particle_scale=2.0,
+        flow_particle_scale=0.1,
         flow_max_velocity=5.0,
         flow_time_embed_dim=8,
-        policy_type="gaussian",
-        flow_policy_max_velocity=5.0,
-        flow_policy_base_std=0.35,
-        flow_policy_loss_samples=8,
-        flow_policy_output_scale=0.25,
+        flow_entropy_eps=1e-6,
     )
 
 
-def test_ppo_uses_direct_transport_critic_by_default():
-    model = PPO(obs_shape=3, action_dim=2, n_embd=8, num_quants=5)
-
-    values = model.get_values(torch.zeros(4, 3))
-
-    assert isinstance(model.critic, ValueFlowCritic)
-    assert values.shape == (4, 5)
-
-
-def test_ppo_can_use_flow_field_critic_by_flag():
+def test_scalar_flag_selects_scalar_critic():
     model = PPO(
         obs_shape=3,
         action_dim=2,
         n_embd=8,
-        num_quants=5,
-        critic_type="flow_field",
-        num_flow_steps=3,
-        flow_integrator="rk4",
+        value_method="scalar",
     )
-
     values = model.get_values(torch.zeros(4, 3))
+    assert isinstance(model.actor, Actor)
+    assert isinstance(model.critic, ScalarValueCritic)
+    assert model.target_critic is None
+    assert values.shape == (4, 1)
 
-    assert isinstance(model.critic, FlowFieldValueCritic)
-    assert model.critic.num_flow_steps == 3
-    assert model.critic.integrator == "rk4"
-    assert values.shape == (4, 5)
 
-
-def test_ppo_can_use_floq_critic_by_flag():
+def test_wasserstein_flag_selects_inverse_cdf_critic():
     model = PPO(
         obs_shape=3,
         action_dim=2,
         n_embd=8,
-        num_quants=5,
-        critic_type="floq",
+        value_method="wasserstein",
+        num_value_particles=5,
+    )
+    values = model.get_values(torch.zeros(4, 3))
+    assert isinstance(model.critic, QuantileValueCritic)
+    assert isinstance(model.target_critic, QuantileValueCritic)
+    assert values.shape == (4, 5)
+    assert torch.all(values[..., 1:] >= values[..., :-1])
+
+
+def test_flow_flag_selects_only_flow_matching_critic():
+    model = PPO(
+        obs_shape=3,
+        action_dim=2,
+        n_embd=8,
+        value_method="flow",
+        num_value_particles=5,
         num_flow_steps=3,
         flow_particle_scale=0.1,
         flow_time_embed_dim=8,
     )
-
-    values = model.get_values(torch.zeros(4, 3))
-    flow_loss = model.critic_flow_matching_loss(torch.zeros(4, 3), torch.ones(4, 5))
-
-    assert isinstance(model.critic, FloQValueCritic)
-    assert not hasattr(model.critic, "base_head")
-    assert torch.allclose(model.critic_particles, torch.tensor([-0.08, -0.04, 0.0, 0.04, 0.08]))
+    states = torch.zeros(4, 3)
+    values = model.get_values(states)
+    loss = model.critic_flow_matching_loss(states, torch.ones(4, 5))
+    assert isinstance(model.critic, FlowMatchingValueCritic)
+    assert isinstance(model.target_critic, FlowMatchingValueCritic)
     assert values.shape == (4, 5)
-    assert flow_loss.shape == (4, 5)
-
-
-def test_policy_optimizer_uses_separate_critic_lr():
-    policy = PPO_Policy(
-        _policy_args(lr=3e-4, critic_lr=1e-4),
-        obs_space=Box((3,)),
-        act_space=Discrete(2),
-        num_quants=5,
+    assert loss.shape == (4, 5)
+    assert torch.allclose(
+        model.flow_base_particles,
+        torch.tensor([-0.08, -0.04, 0.0, 0.04, 0.08]),
     )
 
+
+def test_distributional_target_critic_is_frozen_and_polyak_updated():
+    model = PPO(
+        obs_shape=3,
+        action_dim=2,
+        n_embd=8,
+        value_method="wasserstein",
+        num_value_particles=5,
+    )
+    assert all(not parameter.requires_grad for parameter in model.target_critic.parameters())
+    source = next(model.critic.parameters())
+    target = next(model.target_critic.parameters())
+    old_target = target.detach().clone()
+    with torch.no_grad():
+        source.add_(1.0)
+    model.update_target_critic(0.25)
+    assert torch.allclose(target, old_target + 0.25)
+
+
+def test_policy_optimizer_uses_separate_actor_and_critic_rates():
+    policy = PPO_Policy(
+        _policy_args("flow", lr=3e-4, critic_lr=1e-4),
+        obs_space=Box((3,)),
+        act_space=Discrete(2),
+    )
     assert policy.optimizer.param_groups[0]["lr"] == 3e-4
     assert policy.optimizer.param_groups[1]["lr"] == 1e-4
-
     policy.lr_decay(episode=5, episodes=10)
-
     assert policy.optimizer.param_groups[0]["lr"] == 1.5e-4
     assert policy.optimizer.param_groups[1]["lr"] == 5e-5
 
 
-def test_ppo_keeps_flow_as_direct_alias():
-    model = PPO(obs_shape=3, action_dim=2, n_embd=8, num_quants=5, critic_type="flow")
-
-    assert model.critic_type == "direct"
-    assert isinstance(model.critic, ValueFlowCritic)
-
-
-def test_ppo_can_use_legacy_critic_by_flag():
-    model = PPO(
-        obs_shape=3,
-        action_dim=2,
-        n_embd=8,
-        num_quants=5,
-        critic_type="legacy",
-    )
-
-    values = model.get_values(torch.zeros(4, 3))
-
-    assert isinstance(model.critic, Critic)
-    assert values.shape == (4, 5)
-
-
-def test_ppo_can_use_one_step_flow_policy_by_flag():
-    model = PPO(
-        obs_shape=3,
-        action_dim=2,
-        n_embd=8,
-        action_type="Continuous",
-        num_quants=5,
-        policy_type="flow",
-        flow_policy_max_velocity=2.0,
-    )
-
-    obs = torch.zeros(4, 3)
-    actions, action_log_proxy, values = model.get_actions(obs)
-    eval_log_proxy, eval_values, entropy, _ = model(obs, actions)
-    loss = -eval_log_proxy.mean()
-    loss.backward()
-
-    assert isinstance(model.actor, FlowActor)
-    assert actions.shape == (4, 2)
-    assert action_log_proxy.shape == (4, 1)
-    assert values.shape == (4, 5)
-    assert eval_log_proxy.shape == (4, 1)
-    assert eval_values.shape == (4, 5)
-    assert entropy.shape == (4, 1)
-    assert torch.isfinite(eval_log_proxy).all()
-    assert any(p.grad is not None for p in model.actor.parameters())
-
-
-def test_policy_wrapper_passes_flow_policy_type():
-    flow_args = _policy_args()
-    flow_args.policy_type = "flow"
-    flow_policy = PPO_Policy(
-        flow_args,
-        obs_space=Box((3,)),
-        act_space=Box((2,)),
-        num_quants=5,
-    )
-
-    assert isinstance(flow_policy.transformer.actor, FlowActor)
+def test_invalid_value_method_is_rejected():
+    try:
+        PPO(obs_shape=3, action_dim=2, n_embd=8, value_method="ambiguous")
+    except ValueError as error:
+        assert "value_method" in str(error)
+    else:
+        raise AssertionError("invalid value method was accepted")

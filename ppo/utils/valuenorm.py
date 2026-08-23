@@ -37,7 +37,7 @@ class ValueNorm(nn.Module):
 
     @torch.no_grad()
     def update(self, input_vector):
-        if type(input_vector) == np.ndarray:
+        if isinstance(input_vector, np.ndarray):
             input_vector = torch.from_numpy(input_vector)
         input_vector = input_vector.to(**self.tpdv)
 
@@ -56,26 +56,22 @@ class ValueNorm(nn.Module):
 
     def normalize(self, input_vector):
         # Make sure input is float32
-        if type(input_vector) == np.ndarray:
+        if isinstance(input_vector, np.ndarray):
             input_vector = torch.from_numpy(input_vector)
         input_vector = input_vector.to(**self.tpdv)
 
         mean, var = self.running_mean_var()
         out = (input_vector - mean[(None,) * self.norm_axes]) / torch.sqrt(var)[(None,) * self.norm_axes]
-        out, _ = torch.sort(out, dim=-1)
-        
         return out
 
     def denormalize(self, input_vector):
         """ Transform normalized data back into original distribution """
-        if type(input_vector) == np.ndarray:
+        if isinstance(input_vector, np.ndarray):
             input_vector = torch.from_numpy(input_vector)
         input_vector = input_vector.to(**self.tpdv)
 
         mean, var = self.running_mean_var()
         out = input_vector * torch.sqrt(var)[(None,) * self.norm_axes] + mean[(None,) * self.norm_axes]
-        out, _ = torch.sort(out, dim=-1)
-        
         out = out.cpu().numpy()
         
         return out

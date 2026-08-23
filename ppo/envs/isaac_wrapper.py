@@ -1,11 +1,19 @@
 import torch
-import gymnasium as gym
 from ppo.envs.env_wrappers import ShareVecEnv
 
 class IsaacLabVecEnvWrapper(ShareVecEnv):
     def __init__(self, env):
         self.env = env
-        self.observation_space = self.env.observation_space
+        raw_observation_space = self.env.observation_space
+        if (
+            raw_observation_space.__class__.__name__ == "Dict"
+            and "policy" in raw_observation_space.spaces
+        ):
+            self._obs_key = "policy"
+            self.observation_space = raw_observation_space.spaces["policy"]
+        else:
+            self._obs_key = None
+            self.observation_space = raw_observation_space
         self.action_space = self.env.action_space
         self.num_envs = self.env.unwrapped.num_envs
 
@@ -15,14 +23,6 @@ class IsaacLabVecEnvWrapper(ShareVecEnv):
         # If your env returns a flat tensor, you can adjust this.
         # self._check_obs_structure()
 
-    def _check_obs_structure(self, sample):
-        # Helper to determine how to extract observations
-        # sample = self.env.observation_space.sample()
-        if isinstance(sample, dict) and "policy" in sample:
-            self._obs_key = "policy"
-        else:
-            self._obs_key = None # Assume flat observation
-
     def _extract_obs(self, obs):
         if self._obs_key:
             return obs[self._obs_key]
@@ -30,7 +30,6 @@ class IsaacLabVecEnvWrapper(ShareVecEnv):
 
     def reset(self):
         obs, _ = self.env.reset()
-        self._check_obs_structure(obs)
         obs = self._extract_obs(obs)
         # Your runner expects: (num_envs, n_agents, obs_dim) or (num_envs, obs_dim)
         # IsaacLab returns (num_envs, obs_dim). We might need to unsqueeze if your code expects n_agents dim
@@ -55,9 +54,6 @@ class IsaacLabVecEnvWrapper(ShareVecEnv):
         obs, rews, terminated, truncated, infos = self.env.step(actions)
         
         obs = self._extract_obs(obs)
-        
-        # Combine done flags (terminated or truncated)
-        dones = terminated | truncated
         
         # Your runner might expect numpy. If you want high performance, 
         # modify your runner to handle tensors. For compatibility, we can leave as tensors

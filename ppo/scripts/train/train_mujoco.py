@@ -1,18 +1,23 @@
 #!/usr/bin/env python
 import sys
 import os
-import wandb
 import socket
-import setproctitle
 import numpy as np
 from pathlib import Path
 import torch
 import gymnasium as gym
 
-sys.path.append("../../")
-from ppo.config import get_config
-from ppo.runner.shared.mujoco_runner import MujocoRunner as Runner
-from ppo.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+
+from ppo.config import get_config  # noqa: E402
+from ppo.runner.shared.mujoco_runner import MujocoRunner as Runner  # noqa: E402
+from ppo.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv  # noqa: E402
 
 """Train script for MuJoCo."""
 def make_train_env(all_args):
@@ -23,7 +28,8 @@ def make_train_env(all_args):
             else:
                 print("Can not support the " + all_args.env_name + "environment.")
                 raise NotImplementedError
-            # env.seed(all_args.seed + rank * 1000)
+            env.reset(seed=all_args.seed + rank * 1000)
+            env.action_space.seed(all_args.seed + rank * 1000)
             return env
 
         return init_env
@@ -42,7 +48,9 @@ def make_eval_env(all_args):
             else:
                 print("Can not support the " + all_args.env_name + "environment.")
                 raise NotImplementedError
-            # env.seed(all_args.seed * 50000 + rank * 10000)
+            eval_seed = all_args.seed * 50_000 + rank * 10_000
+            env.reset(seed=eval_seed)
+            env.action_space.seed(eval_seed)
             return env
 
         return init_env
@@ -55,7 +63,7 @@ def make_eval_env(all_args):
 
 def parse_args(args, parser):
     parser.add_argument('--scenario', type=str, default='Humanoid-v4', help="Which mujoco task to run on")
-    all_args = parser.parse_known_args(args)[0]
+    all_args = parser.parse_args(args)
 
     return all_args
 
@@ -63,7 +71,7 @@ def parse_args(args, parser):
 def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
-    print("mumu config: ", all_args)
+    print("training config: ", all_args)
 
     # cuda
     if all_args.cuda and torch.cuda.is_available():
@@ -79,18 +87,22 @@ def main(args):
         torch.set_num_threads(all_args.n_training_threads)
 
     run_dir = Path(os.path.split(os.path.dirname(os.path.abspath(__file__)))[
-                       0] + "/results") / all_args.env_name / all_args.scenario / all_args.algorithm_name
+                       0] + "/results") / all_args.env_name / all_args.scenario / all_args.value_method
     if not run_dir.exists():
         os.makedirs(str(run_dir))
 
     if all_args.use_wandb:
+        if wandb is None:
+            raise ImportError(
+                "Weights & Biases is not installed; install wandb or set --use_wandb false"
+            )
         run = wandb.init(config=all_args,
                          project=all_args.scenario,
                          entity=all_args.user_name,
                          notes=socket.gethostname(),
-                         name=str(all_args.algorithm_name) +
-                              "_seed_" + str(all_args.seed),
-                         group='PPO',
+                         name=all_args.wandb_name or
+                              f"{all_args.value_method}_seed_{all_args.seed}",
+                         group='clean-dppo',
                          dir=str(run_dir),
                          job_type="training",
                          reinit=True)
@@ -107,10 +119,6 @@ def main(args):
         run_dir = run_dir / curr_run
         if not run_dir.exists():
             os.makedirs(str(run_dir))
-
-    setproctitle.setproctitle(
-        str(all_args.algorithm_name) + "-" + str(all_args.env_name) + "@" + str(
-            all_args.user_name))
 
     # seed
     torch.manual_seed(all_args.seed)
@@ -140,8 +148,8 @@ def main(args):
     if all_args.use_wandb:
         run.finish()
     else:
-        runner.writter.export_scalars_to_json(str(runner.log_dir + '/summary.json'))
-        runner.writter.close()
+        runner.writer.flush()
+        runner.writer.close()
 
 
 if __name__ == "__main__":

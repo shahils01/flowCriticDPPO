@@ -21,7 +21,7 @@ python3 train/train_isaac.py \
  --scenario ${scenario} \
  --critic_lr 3e-4 \
  --lr 3e-4 \
- --num_quants 1 \
+ --value_method scalar \
  --entropy_coef 0.0 \
  --gamma 0.99 \
  --gae_lambda 0.95 \
@@ -34,15 +34,8 @@ python3 train/train_isaac.py \
  --num_env_steps 200000000 \
  --ppo_epoch 8 \
  --clip_param 0.2 \
- --add_center_xy \
- --use_state_agent \
  --use_value_active_masks \
- --use_policy_active_masks \
-#  --use_wandb True \
-#  --wandb_name "xxx" \
-#  --user_name "shahil-shaik7-clemson-university" \
-#  --moe_policy True \
-#  --num_experts 4 \
+ --use_policy_active_masks
 
 
 # Do the following when running on Apptainer:

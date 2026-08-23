@@ -1,19 +1,22 @@
 #!/usr/bin/env python
 import sys
 import os
-import wandb
 import socket
-import setproctitle
 import numpy as np
 from pathlib import Path
 import torch
-import gym_env
 import gymnasium as gym
 
-sys.path.append("../../")
-from ppo.config import get_config
-from ppo.runner.shared.mujoco_runner import MujocoRunner as Runner
-from ppo.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT))
+
+try:
+    import wandb
+except ImportError:
+    wandb = None
+from ppo.config import get_config  # noqa: E402
+from ppo.runner.shared.mujoco_runner import MujocoRunner as Runner  # noqa: E402
+from ppo.envs.env_wrappers import ShareSubprocVecEnv, ShareDummyVecEnv  # noqa: E402
 
 """Train script for MuJoCo."""
 def make_train_env(all_args):
@@ -62,7 +65,7 @@ def make_eval_env(all_args):
 
 def parse_args(args, parser):
     parser.add_argument('--scenario', type=str, default='Humanoid-v4', help="Which mujoco task to run on")
-    all_args = parser.parse_known_args(args)[0]
+    all_args = parser.parse_args(args)
 
     return all_args
 
@@ -91,6 +94,10 @@ def main(args):
         os.makedirs(str(run_dir))
 
     if all_args.use_wandb:
+        if wandb is None:
+            raise ImportError(
+                "Weights & Biases is not installed; install wandb or set --use_wandb false"
+            )
         run = wandb.init(config=all_args,
                          project=all_args.scenario,
                          entity=all_args.user_name,
@@ -114,10 +121,6 @@ def main(args):
         run_dir = run_dir / curr_run
         if not run_dir.exists():
             os.makedirs(str(run_dir))
-
-    setproctitle.setproctitle(
-        str(all_args.algorithm_name) + "-" + str(all_args.env_name) + "@" + str(
-            all_args.user_name))
 
     # seed
     torch.manual_seed(all_args.seed)
@@ -151,8 +154,8 @@ def main(args):
     if all_args.use_wandb:
         run.finish()
     else:
-        runner.writter.export_scalars_to_json(str(runner.log_dir + '/summary.json'))
-        runner.writter.close()
+        runner.writer.flush()
+        runner.writer.close()
 
 
 if __name__ == "__main__":

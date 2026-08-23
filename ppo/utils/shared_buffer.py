@@ -1,417 +1,280 @@
-import torch
+"""Single-agent rollout buffer for the three supported value methods."""
+
 import numpy as np
-import torch.nn.functional as F
+import torch
+
 from ppo.algorithms.ppo.flow_gae import (
     compute_flow_gae,
-    make_standard_normal_particles,
-    make_uniform_particles,
+    generalized_advantage_estimate,
 )
-from ppo.utils.util import get_shape_from_obs_space, get_shape_from_act_space
+from ppo.algorithms.ppo.wasserstein_gae import compute_wasserstein_gae
+from ppo.utils.util import get_shape_from_act_space, get_shape_from_obs_space
 
 
-def _flatten(T, N, x):
-    return x.reshape(T * N, *x.shape[2:])
+class SharedReplayBuffer:
+    """Store one fixed-length vectorized rollout and construct critic targets."""
 
-
-def _cast(x):
-    return x.transpose(1, 2, 0, 3).reshape(-1, *x.shape[3:])
-
-
-def _shuffle_agent_grid(x, y):
-    rows = np.indices((x, y))[0]
-    cols = np.stack([np.arange(y) for _ in range(x)])
-    return rows, cols
-
-
-class SharedReplayBuffer(object):
-    """
-    Buffer to store training data.
-    :param args: (argparse.Namespace) arguments containing relevant model, policy, and env information.
-    :param obs_space: (gym.Space) observation space of agents.
-    :param act_space: (gym.Space) action space for agents.
-    """
-
-    def __init__(self, args, obs_space, act_space, env_name, use_value_entropy=True):
+    def __init__(self, args, obs_space, act_space, env_name):
+        del env_name  # Kept in the signature for runner compatibility.
         self.episode_length = args.episode_length
         self.n_rollout_threads = args.n_rollout_threads
-        self.hidden_size = args.hidden_size
         self.gamma = args.gamma
         self.gae_lambda = args.gae_lambda
-        self._use_gae = args.use_gae
-        self._use_popart = args.use_popart
-        self._use_valuenorm = args.use_valuenorm
-        self._use_proper_time_limits = args.use_proper_time_limits
-        self.algo = args.algorithm_name
-        self.env_name = env_name
-        self.critic_type = getattr(args, "critic_type", "direct")
-        if self.critic_type == "flow":
-            self.critic_type = "direct"
-        self.use_legacy_scalar_gae = (
-            getattr(args, "use_legacy_scalar_gae", False)
-            or self.critic_type == "legacy"
+        self.value_method = args.value_method
+        self.num_value_particles = (
+            1 if self.value_method == "scalar" else args.num_value_particles
         )
-        self.num_quants = args.num_quants
-        self.flow_weight_mode = getattr(args, "flow_weight_mode", "uniform")
-        self.flow_alpha = getattr(args, "flow_alpha", 0.1)
-        self.flow_eta = getattr(args, "flow_eta", 1.0)
-        self.flow_entropy_beta = getattr(args, "flow_entropy_beta", 0.0)
-        self.flow_entropy_delta_mode = getattr(args, "flow_entropy_delta_mode", "bellman")
-        self.flow_entropy_eps = getattr(args, "flow_entropy_eps", 1e-6)
-        self.dgae_epsilon = args.dgae_epsilon
-        self.use_value_entropy = args.use_value_entropy
-        self.true_integration = args.true_integration
-        
+        if self.value_method != "scalar" and self.num_value_particles < 2:
+            raise ValueError("Distributional value methods require at least two particles")
+
+        self.flow_weight_mode = args.flow_weight_mode
+        self.flow_alpha = args.flow_alpha
+        self.flow_eta = args.flow_eta
+        self.flow_entropy_beta = args.flow_entropy_beta
+        self.wasserstein_entropy_beta = args.wasserstein_entropy_beta
+        self.distribution_entropy_eps = args.distribution_entropy_eps
+
         obs_shape = get_shape_from_obs_space(obs_space)
-        self.obs_is_dict = isinstance(obs_shape, dict)
+        if isinstance(obs_shape, dict) or len(obs_shape) != 1:
+            raise ValueError(
+                f"Expected a vector observation space, received {obs_shape}"
+            )
+        action_shape = get_shape_from_act_space(act_space)
+        rollout_shape = (self.episode_length, self.n_rollout_threads)
 
-        if not self.obs_is_dict:
-            if type(obs_shape[-1]) == list:
-                obs_shape = obs_shape[:1]
-
-            if env_name == 'IsaacLab' and len(obs_shape) == 1:
-                obs_shape = (obs_shape[-1],)
-
-            self.obs = np.zeros((self.episode_length + 1, self.n_rollout_threads, 1, *obs_shape), dtype=np.float32)
-        else:
-            self.obs = {
-                k: np.zeros((self.episode_length + 1, self.n_rollout_threads, 1, *shape), dtype=np.float32)
-                for k, shape in obs_shape.items()
-            }
-        self.value_preds = np.zeros(
-            (self.episode_length + 1, self.n_rollout_threads, 1, self.num_quants), dtype=np.float32)
-        self.returns = np.zeros_like(self.value_preds)
-        self.value_entropies = np.zeros(
-            (self.episode_length + 1, self.n_rollout_threads, 1, 1), dtype=np.float32)
-        self.has_value_entropies = False
-        self.advantages = np.zeros(
-            (self.episode_length, self.n_rollout_threads, 1, 1), dtype=np.float32)
-
-        act_shape = get_shape_from_act_space(act_space)
-        print('act_shape after = ', act_shape)
-        action_log_shape = 1 if getattr(args, "policy_type", "gaussian") == "flow" else act_shape
-
+        self.obs = np.zeros(
+            (self.episode_length + 1, self.n_rollout_threads, *obs_shape),
+            dtype=np.float32,
+        )
+        self.transition_next_obs = np.zeros(
+            (*rollout_shape, *obs_shape), dtype=np.float32
+        )
         self.actions = np.zeros(
-            (self.episode_length, self.n_rollout_threads, 1, act_shape), dtype=np.float32)
+            (*rollout_shape, action_shape), dtype=np.float32
+        )
         self.action_log_probs = np.zeros(
-            (self.episode_length, self.n_rollout_threads, 1, action_log_shape), dtype=np.float32)
-
-        self.rewards = np.zeros(
-            (self.episode_length, self.n_rollout_threads, 1, 1), dtype=np.float32)
-
-        self.masks = np.ones((self.episode_length + 1, self.n_rollout_threads, 1, 1), dtype=np.float32)
-        self.bad_masks = np.ones_like(self.masks)
-        self.active_masks = np.ones_like(self.masks)
-
+            (*rollout_shape, 1), dtype=np.float32
+        )
+        self.value_preds = np.zeros(
+            (*rollout_shape, self.num_value_particles), dtype=np.float32
+        )
+        self.value_targets = np.zeros_like(self.value_preds)
+        self.advantages = np.zeros((*rollout_shape, 1), dtype=np.float32)
+        self.rewards = np.zeros((*rollout_shape, 1), dtype=np.float32)
+        self.masks = np.ones(
+            (self.episode_length + 1, self.n_rollout_threads, 1),
+            dtype=np.float32,
+        )
+        self.bootstrap_masks = np.ones((*rollout_shape, 1), dtype=np.float32)
+        self.active_masks = np.ones((*rollout_shape, 1), dtype=np.float32)
+        self.value_entropy_lengths = np.zeros(
+            (*rollout_shape, 1), dtype=np.float32
+        )
+        self.has_value_entropy_lengths = False
         self.step = 0
 
-        self.q = np.exp(np.linspace(0, 1, self.num_quants))
-        self.q = self.q[1:] - self.q[:-1]
-        self.q = np.tile(self.q, (self.n_rollout_threads, 1))
-        self.q = self.q[:, np.newaxis, :]
+    def insert(
+        self,
+        obs,
+        actions,
+        action_log_probs,
+        value_preds,
+        rewards,
+        masks,
+        active_masks=None,
+        value_entropy_length=None,
+        transition_next_obs=None,
+        bootstrap_masks=None,
+    ):
+        """Insert a vectorized environment step."""
+        transition_next_obs = obs if transition_next_obs is None else transition_next_obs
+        bootstrap_masks = masks if bootstrap_masks is None else bootstrap_masks
 
-        self.gamma_normalizer = ((1/args.gamma) ** torch.arange(args.episode_length, dtype=torch.float32)).unsqueeze(1).repeat(self.n_rollout_threads,1,1)
-        self.gamma_normalizer = self.gamma_normalizer.detach().cpu().numpy()
-
-        if self.num_quants > 1:
-            self.quantile_spacing = 1.0 / (self.num_quants - 1)
-
-    def insert(self, obs, actions, action_log_probs, value_preds, rewards, masks, bad_masks=None, active_masks=None, value_entropy=None):
-        """
-        Insert data into the buffer.
-        :param share_obs: (argparse.Namespace) arguments containing relevant model, policy, and env information.
-        :param obs: (np.ndarray) local agent observations.
-        :param rnn_states_actor: (np.ndarray) RNN states for actor network.
-        :param rnn_states_critic: (np.ndarray) RNN states for critic network.
-        :param actions:(np.ndarray) actions taken by agents.
-        :param action_log_probs:(np.ndarray) log probs of actions taken by agents
-        :param value_preds: (np.ndarray) value function prediction at each step.
-        :param rewards: (np.ndarray) reward collected at each step.
-        :param masks: (np.ndarray) denotes whether the environment has terminated or not.
-        :param bad_masks: (np.ndarray) action space for agents.
-        :param active_masks: (np.ndarray) denotes whether an agent is active or dead in the env.
-        :param available_actions: (np.ndarray) actions available to each agent. If None, all actions are available.
-        """
-        if self.obs_is_dict:
-            for k in self.obs.keys():
-                self.obs[k][self.step + 1] = np.expand_dims(obs[k], axis=1).copy()
-        else:
-            self.obs[self.step + 1] = np.expand_dims(obs, axis=1).copy()
-        self.actions[self.step] = np.expand_dims(actions, axis=1).copy()
-        self.action_log_probs[self.step] = np.expand_dims(action_log_probs, axis=1).copy()
-        self.value_preds[self.step] = np.expand_dims(value_preds, axis=1).copy()
-        if value_entropy is not None:
-            self.value_entropies[self.step] = np.expand_dims(value_entropy, axis=1).copy()
-            self.has_value_entropies = True
-        self.rewards[self.step] = np.expand_dims(rewards, axis=1).copy()
-        self.masks[self.step + 1] = np.expand_dims(masks, axis=1).copy()
-        if bad_masks is not None:
-            self.bad_masks[self.step + 1] = np.expand_dims(bad_masks, axis=1).copy()
+        self.obs[self.step + 1] = np.asarray(obs, dtype=np.float32)
+        self.transition_next_obs[self.step] = np.asarray(
+            transition_next_obs, dtype=np.float32
+        )
+        self.actions[self.step] = np.asarray(actions, dtype=np.float32)
+        self.action_log_probs[self.step] = np.asarray(
+            action_log_probs, dtype=np.float32
+        )
+        self.value_preds[self.step] = np.asarray(value_preds, dtype=np.float32)
+        self.rewards[self.step] = np.asarray(rewards, dtype=np.float32)
+        self.masks[self.step + 1] = np.asarray(masks, dtype=np.float32)
+        self.bootstrap_masks[self.step] = np.asarray(
+            bootstrap_masks, dtype=np.float32
+        )
         if active_masks is not None:
-            self.active_masks[self.step + 1] = np.expand_dims(active_masks, axis=1).copy()
-        
+            self.active_masks[self.step] = np.asarray(
+                active_masks, dtype=np.float32
+            )
+        if value_entropy_length is not None:
+            self.value_entropy_lengths[self.step] = np.asarray(
+                value_entropy_length, dtype=np.float32
+            )
+            self.has_value_entropy_lengths = True
         self.step = (self.step + 1) % self.episode_length
 
     def after_update(self):
-        """Copy last timestep data to first index. Called after update to model."""
-        if self.obs_is_dict:
-            for k in self.obs.keys():
-                self.obs[k][0] = self.obs[k][-1].copy()
-        else:
-            self.obs[0] = self.obs[-1].copy()
+        self.obs[0] = self.obs[-1].copy()
         self.masks[0] = self.masks[-1].copy()
-        self.bad_masks[0] = self.bad_masks[-1].copy()
-        self.active_masks[0] = self.active_masks[-1].copy()
-        self.value_entropies[0] = self.value_entropies[-1].copy()
-        self.has_value_entropies = False
+        self.has_value_entropy_lengths = False
 
-    def chooseafter_update(self):
-        """Copy last timestep data to first index. This method is used for Hanabi."""
-        self.masks[0] = self.masks[-1].copy()
-        self.bad_masks[0] = self.bad_masks[-1].copy()
+    def compute_returns(
+        self,
+        next_values=None,
+        value_normalizer=None,
+        target_next_entropy_lengths=None,
+    ):
+        """Compute advantages and particlewise Bellman targets."""
+        if next_values is None:
+            raise ValueError("next_values are required to construct Bellman targets")
+        next_values = np.asarray(next_values, dtype=np.float32)
+        if next_values.shape != self.value_preds.shape:
+            if next_values.size != self.value_preds.size:
+                raise ValueError(
+                    "next_values must have shape "
+                    f"{self.value_preds.shape}, got {next_values.shape}"
+                )
+            next_values = next_values.reshape(self.value_preds.shape)
 
-    def compute_returns(self, next_value, value_normalizer=None, flow_weight_mode="uniform", next_value_entropy=None):
-        """
-        Compute returns either as discounted sum of rewards, or using GAE.
-        :param next_value: (np.ndarray) value predictions for the step after the last episode step.
-        :param value_normalizer: (PopArt) If not None, PopArt value normalizer instance.
-        """
-        self.value_preds[-1] = np.expand_dims(next_value, axis=1).copy()
-        if next_value_entropy is not None:
-            self.value_entropies[-1] = np.expand_dims(next_value_entropy, axis=1).copy()
-            self.has_value_entropies = True
-        if self.critic_type in {"direct", "flow_field", "floq"}:
-            self.compute_flow_returns(value_normalizer, flow_weight_mode)
-            return
+        current_values = self._denormalize(self.value_preds, value_normalizer)
+        next_values = self._denormalize(next_values, value_normalizer)
+        rewards = torch.as_tensor(self.rewards, dtype=torch.float32)
+        bootstrap_masks = torch.as_tensor(
+            self.bootstrap_masks, dtype=torch.float32
+        )
+        trace_masks = torch.as_tensor(self.masks[1:], dtype=torch.float32)
 
-        if self.num_quants == 1 and not self.use_legacy_scalar_gae:
-            self.compute_scalar_flow_gae_returns(value_normalizer)
-            return
-
-        gae = 0
-        for step in reversed(range(self.rewards.shape[0])):
-            if self._use_popart or self._use_valuenorm:
-                if self.num_quants == 1:
-                    delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(
-                            self.value_preds[step + 1]) * self.masks[step + 1] \
-                                - value_normalizer.denormalize(self.value_preds[step])
-                else:
-                    delta = self.rewards[step] + self.wasserstein_like_distance(self.gamma * value_normalizer.denormalize(
-                        self.value_preds[step + 1]) * self.masks[step + 1], value_normalizer.denormalize(self.value_preds[step]), step)
-                
-                gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
-
-                self.advantages[step] = gae
-                self.returns[step] = gae + value_normalizer.denormalize(self.value_preds[step])
-            else:
-                if self.num_quants == 1:
-                    delta = self.rewards[step] + self.gamma * self.value_preds[step + 1] * \
-                                self.masks[step + 1] - self.value_preds[step]
-                else:
-                    delta = self.wasserstein_like_distance(self.rewards[step] + self.gamma * self.value_preds[step + 1] * \
-                            self.masks[step + 1], self.value_preds[step], step)
-
-                gae = delta + self.gamma * self.gae_lambda * self.masks[step + 1] * gae
-
-                self.advantages[step] = (gae - gae.mean()) / (gae.std() + 1e-8) #gae
-                self.returns[step] = gae + self.value_preds[step]
-
-    def get_denormalized_value_particles(self, value_normalizer=None):
-        if self._use_popart or self._use_valuenorm:
-            return value_normalizer.denormalize(self.value_preds)
-        return self.value_preds
-
-    def compute_flow_returns(self, value_normalizer=None, flow_weight_mode="uniform"):
-        value_particles = self.get_denormalized_value_particles(value_normalizer)
-        current_particles = value_particles[:-1]
-        next_particles = value_particles[1:]
-        masks = self.masks[1:]
-        current_entropy = None
-        next_entropy = None
-        if self.flow_entropy_beta != 0.0 and not self.has_value_entropies:
-            raise RuntimeError(
-                "flow entropy is enabled, but no critic-side value entropies were "
-                "stored in the buffer"
+        current = torch.as_tensor(current_values, dtype=torch.float32)
+        following = torch.as_tensor(next_values, dtype=torch.float32)
+        if self.value_method == "scalar":
+            deltas = rewards + self.gamma * bootstrap_masks * following - current
+            advantages = generalized_advantage_estimate(
+                deltas, self.gamma, self.gae_lambda, trace_masks
             )
-        if self.has_value_entropies:
-            current_entropy = self.value_entropies[:-1]
-            next_entropy = self.value_entropies[1:]
-
-        if self.critic_type == "floq":
-            z = make_uniform_particles(self.num_quants, torch.device("cpu"))
+            value_targets = advantages + current
+        elif self.value_method == "wasserstein":
+            advantages, value_targets = compute_wasserstein_gae(
+                rewards=rewards,
+                current_quantiles=current,
+                target_next_quantiles=following,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                masks=bootstrap_masks,
+                entropy_beta=self.wasserstein_entropy_beta,
+                entropy_eps=self.distribution_entropy_eps,
+                trace_masks=trace_masks,
+            )
         else:
-            z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
-        advantages, returns = compute_flow_gae(
-            rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
-            current_particles=torch.as_tensor(current_particles, dtype=torch.float32),
-            next_particles=torch.as_tensor(next_particles, dtype=torch.float32),
-            z=z,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            masks=torch.as_tensor(masks, dtype=torch.float32),
-            mode=flow_weight_mode,
-            alpha=self.flow_alpha,
-            eta=self.flow_eta,
-            entropy_beta=self.flow_entropy_beta,
-            entropy_delta_mode=self.flow_entropy_delta_mode,
-            entropy_eps=self.flow_entropy_eps,
-            current_entropy=current_entropy,
-            next_entropy=next_entropy,
-        )#.detach().cpu().numpy()
+            current_lengths = None
+            target_lengths = None
+            if self.flow_entropy_beta != 0.0:
+                if not self.has_value_entropy_lengths:
+                    raise ValueError(
+                        "Current flow entropy lengths were not stored during rollout"
+                    )
+                if target_next_entropy_lengths is None:
+                    raise ValueError("Target flow entropy lengths are required")
+                entropy_scale = self._normalization_scale(value_normalizer)
+                current_lengths = self.value_entropy_lengths * entropy_scale
+                target_lengths = (
+                    np.asarray(target_next_entropy_lengths, dtype=np.float32)
+                    .reshape(self.value_entropy_lengths.shape)
+                    * entropy_scale
+                )
 
-        self.advantages[:] = advantages
-        self.returns[:-1] = returns
-        # self.returns[:-1] = self.rewards + self.gamma * masks * next_particles
+            advantages, value_targets = compute_flow_gae(
+                rewards=rewards,
+                current_particles=current,
+                target_next_particles=following,
+                gamma=self.gamma,
+                gae_lambda=self.gae_lambda,
+                masks=bootstrap_masks,
+                weight_mode=self.flow_weight_mode,
+                alpha=self.flow_alpha,
+                eta=self.flow_eta,
+                entropy_beta=self.flow_entropy_beta,
+                current_entropy_length=current_lengths,
+                target_next_entropy_length=target_lengths,
+                trace_masks=trace_masks,
+            )
 
-    def compute_scalar_flow_gae_returns(self, value_normalizer=None):
-        value_particles = self.get_denormalized_value_particles(value_normalizer)
-        current_particles = value_particles[:-1]
-        next_particles = value_particles[1:]
+        self.advantages[:] = advantages.detach().cpu().numpy()
+        self.value_targets[:] = value_targets.detach().cpu().numpy()
 
-        z = make_standard_normal_particles(self.num_quants, torch.device("cpu"))
-        advantages = compute_flow_gae(
-            rewards=torch.as_tensor(self.rewards, dtype=torch.float32),
-            current_particles=torch.as_tensor(current_particles, dtype=torch.float32),
-            next_particles=torch.as_tensor(next_particles, dtype=torch.float32),
-            z=z,
-            gamma=self.gamma,
-            gae_lambda=self.gae_lambda,
-            masks=torch.as_tensor(self.masks[1:], dtype=torch.float32),
-            mode="uniform",
-        ).detach().cpu().numpy()
+    @staticmethod
+    def _denormalize(values, value_normalizer):
+        if value_normalizer is None:
+            return np.asarray(values, dtype=np.float32)
+        return value_normalizer.denormalize(values)
 
-        self.advantages[:] = advantages
-        self.returns[:-1] = advantages + current_particles
+    @staticmethod
+    def _normalization_scale(value_normalizer):
+        if value_normalizer is None:
+            return 1.0
+        _, variance = value_normalizer.running_mean_var()
+        return float(torch.sqrt(variance).reshape(-1)[0].detach().cpu())
 
-    def wasserstein_like_distance(self, icdf1, icdf2, step):
-        """
-        Compute the Wasserstein distance between each pair of ICDF functions.
-
-        Parameters:
-        icdf1 (torch.Tensor): Tensor of shape [2048, num_quantiles] representing the first set of ICDFs.
-        icdf2 (torch.Tensor): Tensor of shape [2048, num_quantiles] representing the second set of ICDFs.
-
-        Returns:
-        torch.Tensor: Tensor of shape [2048, 1] representing the Wasserstein distance for each pair of ICDFs.
-        """
-        # Compute the Wasserstein distance
-        # Wasserstein distance between two distributions is the area between their CDFs
-        # For ICDFs, this can be approximated by the average absolute difference between the ICDF values
-        # distances = torch.sum((1/64)*(icdf1 - icdf2), dim=1, keepdim=True)\             
-        if self.use_value_entropy:
-            del_icdf1 = (icdf1[:,:,1:] - icdf1[:,:,:-1])/self.quantile_spacing
-            del_icdf2 = (icdf2[:,:,1:] - icdf2[:,:,:-1])/self.quantile_spacing
-                        
-            icdf1_mids = (icdf1[:,:,1:] + icdf1[:,:,:-1])/2
-            icdf2_mids = (icdf2[:,:,1:] + icdf2[:,:,:-1])/2
-            
-            if self.true_integration:
-                distances = np.sum(self.q*((icdf1_mids - icdf2_mids) + (self.dgae_epsilon/self.gamma**step)*(np.log(del_icdf1+1e-6)-np.log(del_icdf2+1e-6))), axis=-1, keepdims=True)
-            else:
-                distances = np.mean((icdf1_mids - icdf2_mids) + (self.dgae_epsilon/self.gamma**step)*(np.log(del_icdf1+1e-6)-np.log(del_icdf2+1e-6)), axis=-1, keepdims=True)
-        
-        else:
-            distances = np.mean((icdf1 - icdf2), axis=-1, keepdims=True)
-    
-        return distances
-
-
-    def feed_forward_generator_transformer(self, advantages, num_mini_batch=None, mini_batch_size=None):
-        """
-        Yield training data for MLP policies.
-        :param advantages: (np.ndarray) advantage estimates.
-        :param num_mini_batch: (int) number of minibatches to split the batch into.
-        :param mini_batch_size: (int) number of samples in each minibatch.
-        """
-        episode_length, n_rollout_threads = self.rewards.shape[0:2]
-        batch_size = n_rollout_threads * episode_length
-
+    def feed_forward_generator_transformer(
+        self, advantages, num_mini_batch=None, mini_batch_size=None
+    ):
+        """Yield shuffled flat mini-batches, using every rollout sample."""
+        batch_size = self.episode_length * self.n_rollout_threads
+        permutation = torch.randperm(batch_size).numpy()
         if mini_batch_size is None:
-            assert batch_size >= num_mini_batch, (
-                "PPO requires the number of processes ({}) "
-                "* number of steps ({}) = {} "
-                "to be greater than or equal to the number of PPO mini batches ({})."
-                "".format(n_rollout_threads, episode_length,
-                          n_rollout_threads * episode_length,
-                          num_mini_batch))
-            mini_batch_size = batch_size // num_mini_batch
-
-        rand = torch.randperm(batch_size).numpy()
-        sampler = [rand[i * mini_batch_size:(i + 1) * mini_batch_size] for i in range(num_mini_batch)]
-        rows, cols = _shuffle_agent_grid(batch_size, 1)
-
-        if self.obs_is_dict:
-            obs = {
-                k: self.obs[k][:-1].reshape(-1, *self.obs[k].shape[2:])
-                for k in self.obs.keys()
-            }
-            obs = {k: obs[k][rows, cols] for k in obs.keys()}
-
-            next_obs = {
-                k: self.obs[k][1:].reshape(-1, *self.obs[k].shape[2:])
-                for k in self.obs.keys()
-            }
-            next_obs = {k: next_obs[k][rows, cols] for k in next_obs.keys()}
+            if num_mini_batch is None or num_mini_batch < 1:
+                raise ValueError("num_mini_batch must be positive")
+            if batch_size < num_mini_batch:
+                raise ValueError("The rollout batch is smaller than num_mini_batch")
+            samplers = np.array_split(permutation, num_mini_batch)
         else:
-            obs = self.obs[:-1].reshape(-1, *self.obs.shape[2:])
-            obs = obs[rows, cols]
+            if mini_batch_size < 1:
+                raise ValueError("mini_batch_size must be positive")
+            samplers = [
+                permutation[start : start + mini_batch_size]
+                for start in range(0, batch_size, mini_batch_size)
+            ]
 
-            next_obs = self.obs[1:].reshape(-1, *self.obs.shape[2:])
-            next_obs = next_obs[rows, cols]
+        def flatten(values):
+            return values.reshape(batch_size, *values.shape[2:])
 
-        actions = self.actions.reshape(-1, *self.actions.shape[2:])
-        actions = actions[rows, cols]
+        observations = flatten(self.obs[:-1])
+        actions = flatten(self.actions)
+        value_predictions = flatten(self.value_preds)
+        value_targets = flatten(self.value_targets)
+        masks = flatten(self.masks[:-1])
+        active_masks = flatten(self.active_masks)
+        action_log_probs = flatten(self.action_log_probs)
+        advantages = flatten(advantages)
 
-        value_preds = self.value_preds[:-1].reshape(-1, *self.value_preds.shape[2:])
-        value_preds = value_preds[rows, cols]
-        returns = self.returns[:-1].reshape(-1, *self.returns.shape[2:])
-        returns = returns[rows, cols]
-        masks = self.masks[:-1].reshape(-1, *self.masks.shape[2:])
-        masks = masks[rows, cols]
-        active_masks = self.active_masks[:-1].reshape(-1, *self.active_masks.shape[2:])
-        active_masks = active_masks[rows, cols]
-        action_log_probs = self.action_log_probs.reshape(-1, *self.action_log_probs.shape[2:])
-        action_log_probs = action_log_probs[rows, cols]
-        advantages = advantages.reshape(-1, *advantages.shape[2:])
-        advantages = advantages[rows, cols]
-
-        for indices in sampler:
-            # [L,T,N,Dim]-->[L*T,N,Dim]-->[index,N,Dim]-->[index*N, Dim]
-            if self.obs_is_dict:
-                obs_batch = {
-                    k: obs[k][indices].reshape(-1, *self.obs[k].shape[2:])
-                    for k in obs.keys()
-                }
-                next_obs_batch = {
-                    k: next_obs[k][indices].reshape(-1, *self.obs[k].shape[2:])
-                    for k in next_obs.keys()
-                }
-            else:
-                obs_batch = obs[indices].reshape(-1, *self.obs.shape[2:])
-                next_obs_batch = next_obs[indices].reshape(-1, *self.obs.shape[2:])
-
-            actions_batch = actions[indices].reshape(-1, *actions.shape[2:])
-
-            value_preds_batch = value_preds[indices].reshape(-1, *value_preds.shape[2:])
-            return_batch = returns[indices].reshape(-1, *returns.shape[2:])
-            masks_batch = masks[indices].reshape(-1, *masks.shape[2:])
-            active_masks_batch = active_masks[indices].reshape(-1, *active_masks.shape[2:])
-            old_action_log_probs_batch = action_log_probs[indices].reshape(-1, *action_log_probs.shape[2:])
-            if advantages is None:
-                adv_targ = None
-            else:
-                adv_targ = advantages[indices].reshape(-1, *advantages.shape[2:])
-
-            yield obs_batch, actions_batch, value_preds_batch, return_batch, masks_batch,\
-                   active_masks_batch, old_action_log_probs_batch, adv_targ, next_obs_batch
+        for indices in samplers:
+            yield (
+                observations[indices],
+                actions[indices],
+                value_predictions[indices],
+                value_targets[indices],
+                masks[indices],
+                active_masks[indices],
+                action_log_probs[indices],
+                advantages[indices],
+            )
 
     def get_step_obs(self, step):
-        if self.obs_is_dict:
-            return {k: np.concatenate(self.obs[k][step]) for k in self.obs.keys()}
-        return np.concatenate(self.obs[step])
+        return self.obs[step]
+
+    def get_all_transition_next_obs(self):
+        return self.transition_next_obs.reshape(
+            -1, *self.transition_next_obs.shape[2:]
+        )
+
+    def reshape_target_predictions(self, predictions):
+        return np.asarray(predictions).reshape(self.value_preds.shape)
+
+    def reshape_target_entropy_lengths(self, entropy_lengths):
+        return np.asarray(entropy_lengths).reshape(
+            self.value_entropy_lengths.shape
+        )
 
     def set_step_obs(self, step, obs):
-        if self.obs_is_dict:
-            for k in self.obs.keys():
-                self.obs[k][step] = np.expand_dims(obs[k], axis=1).copy()
-        else:
-            self.obs[step] = np.expand_dims(obs, axis=1).copy()
+        self.obs[step] = np.asarray(obs, dtype=np.float32)

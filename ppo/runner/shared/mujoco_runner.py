@@ -1,265 +1,180 @@
+"""Single-agent Gymnasium runner for clean PPO/DPPO experiments."""
+
 import time
-import wandb
+
 import numpy as np
-from functools import reduce
 import torch
-import imageio
-import gymnasium as gym
-import torch.nn.functional as F
 
 from ppo.runner.shared.base_runner import Runner
 
 
-def _t2n(x):
-    return x.detach().cpu().numpy()
-
-
-def faulty_action(action, faulty_node):
-    action_fault = action.copy()
-    if faulty_node >= 0:
-        action_fault[:, faulty_node, :] = 0.
-        # action[:, faulty_node, :] = 0.
-    # return action
-    return action_fault
+def _to_numpy(tensor):
+    return tensor.detach().cpu().numpy()
 
 
 class MujocoRunner(Runner):
-    """Runner class to perform training, evaluation. and data collection for SMAC. See parent class for details."""
-    def __init__(self, config):
-        super(MujocoRunner, self).__init__(config)
-        self.reward_list = []
-        self.reward_list_training = []
-        self.plt_name = 'ppo'
-    
     def run(self):
         self.warmup()
+        started_at = time.time()
+        num_updates = self.num_env_steps // (
+            self.episode_length * self.n_rollout_threads
+        )
+        running_rewards = np.zeros(self.n_rollout_threads, dtype=np.float32)
+        completed_rewards = []
 
-        start = time.time()
-        episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
-
-        train_episode_rewards = [0 for _ in range(self.n_rollout_threads)]
-        done_episodes_rewards = []
-
-        for episode in range(episodes):
+        for update in range(num_updates):
             if self.use_linear_lr_decay:
-                self.trainer.policy.lr_decay(episode, episodes)
+                self.trainer.policy.lr_decay(update, num_updates)
 
             for step in range(self.episode_length):
-                # Sample actions
-                values, value_entropy, actions, action_log_probs = self.collect(step)
-
-                # Obser reward and next obs
+                values, entropy_lengths, actions, log_probs = self.collect(step)
                 obs, rewards, terminated, truncated, infos = self.envs.step(actions)
-                # self.envs.render()
-                rewards = rewards.reshape(-1, 1)
-                dones = terminated.reshape(-1, 1)
-                terminated = terminated.reshape(-1, 1)
-                truncated = truncated.reshape(-1, 1)
+                rewards = np.asarray(rewards, dtype=np.float32).reshape(
+                    self.n_rollout_threads, -1
+                ).mean(axis=1, keepdims=True)
+                terminated = np.asarray(terminated).reshape(
+                    self.n_rollout_threads, -1
+                ).all(axis=1, keepdims=True)
+                truncated = np.asarray(truncated).reshape(
+                    self.n_rollout_threads, -1
+                ).all(axis=1, keepdims=True)
+                dones = np.logical_or(terminated, truncated)
+                transition_next_obs = self.transition_next_observations(
+                    obs, infos, truncated
+                )
 
-                dones_env = np.logical_or(terminated, truncated)
-                dones_env = np.all(dones_env, axis=1)
-                reward_env = np.mean(rewards).flatten()
-                train_episode_rewards += reward_env
-                for t in range(self.n_rollout_threads):
-                    if dones_env[t]:
-                        done_episodes_rewards.append(train_episode_rewards[t])
-                        train_episode_rewards[t] = 0
+                running_rewards += rewards[:, 0]
+                for env_index in np.flatnonzero(dones[:, 0]):
+                    completed_rewards.append(running_rewards[env_index])
+                    running_rewards[env_index] = 0.0
 
-                # Bootstrap reward for truncated episodes. Disabled for now because
-                # value particles may be normalized and GAE should not cross resets.
-                rewards += self.all_args.gamma * np.mean(values, axis=-1, keepdims=True) * truncated
+                self.insert(
+                    obs=obs,
+                    transition_next_obs=transition_next_obs,
+                    rewards=rewards,
+                    dones=dones,
+                    terminated=terminated,
+                    values=values,
+                    entropy_lengths=entropy_lengths,
+                    actions=actions,
+                    log_probs=log_probs,
+                )
 
-                data = obs, rewards, dones, infos, \
-                       values, value_entropy, actions, action_log_probs
-                # insert data into buffer
-                self.insert(data)
+            self.compute()
+            train_info = self.train()
+            total_steps = (
+                (update + 1) * self.episode_length * self.n_rollout_threads
+            )
 
-            # compute return and update network
-            if self.all_args.exploration_steps:
-                if episode <= self.all_args.exploration_steps:
-                    self.compute(flow_weight_mode="smooth_upper_tail")
-                else:
-                    self.compute(flow_weight_mode=self.all_args.flow_weight_mode)
-            else:
-                self.compute(flow_weight_mode=self.all_args.flow_weight_mode)
-            train_infos = self.train()
-
-            # post process
-            total_num_steps = (episode + 1) * self.episode_length * self.n_rollout_threads
-            # save model
-            if (episode % self.save_interval == 0 or episode == episodes - 1):
-                self.save(episode)
-
-            # log information
-            if episode % self.log_interval == 0:
-                end = time.time()
-                fps = int(total_num_steps / (end - start))  # Calculate FPS first
-                print("\n Scenario {} Algo {} updates {}/{} episodes, total num timesteps {}/{}, FPS {}.\n"
-                    .format(
-                        self.all_args.scenario,
-                        self.algorithm_name,
-                        episode,
-                        episodes,
-                        total_num_steps,
-                        self.num_env_steps,
-                        fps
-                    ))
-
-                self.log_train(train_infos, total_num_steps)
-
-                if len(done_episodes_rewards) > 0:
-                    aver_episode_rewards = np.mean(done_episodes_rewards)
-                    print("some episodes done, average rewards: ", aver_episode_rewards)
-                    
-                    if self.use_wandb:
-                        wandb.log({"average_episode_rewards": aver_episode_rewards}, step=total_num_steps)
-                        
-                    #self.writter.add_scalars("train_episode_rewards", {"aver_rewards": aver_episode_rewards}, total_num_steps)
-                    if self.reward_list_training is None:
-                        self.reward_list_training = np.array(np.mean(done_episodes_rewards))
-                    else:
-                        self.reward_list_training = np.hstack((self.reward_list_training, np.array(np.mean(done_episodes_rewards))))
-
-                    np.save(self.plt_name+'_training.npy', self.reward_list_training)
-                
-                    done_episodes_rewards = []
-
-            # eval
-            if episode % self.eval_interval == 0 and self.use_eval:
-                self.eval(total_num_steps)
+            if update % self.save_interval == 0 or update == num_updates - 1:
+                self.save(update)
+            if update % self.log_interval == 0:
+                train_info["average_step_rewards"] = float(self.buffer.rewards.mean())
+                self.log_train(train_info, total_steps)
+                elapsed = max(time.time() - started_at, 1e-6)
+                fps = int(total_steps / elapsed)
+                print(
+                    f"{self.all_args.scenario} | {self.algorithm_name} | "
+                    f"update {update + 1}/{num_updates} | steps {total_steps} | FPS {fps}"
+                )
+                if completed_rewards:
+                    self.log_scalar(
+                        "average_episode_rewards",
+                        float(np.mean(completed_rewards)),
+                        total_steps,
+                    )
+                    completed_rewards.clear()
+            if self.use_eval and update % self.eval_interval == 0:
+                self.eval(total_steps)
 
     def warmup(self):
-        # reset env
-        obs = self.envs.reset() 
-        # if isinstance(obs, dict):
-        #     print('obs keys = ', {k: v.shape for k, v in obs.items()})
-        # else:
-        #     print('obs dim = ', obs.shape)
-        self.buffer.set_step_obs(0, obs)
+        self.buffer.set_step_obs(0, self.envs.reset())
 
     @torch.no_grad()
     def collect(self, step):
         self.trainer.prep_rollout()
-        if getattr(self.all_args, "flow_entropy_beta", 0.0) != 0.0:
-            value, value_entropy, action, action_log_prob \
-                = self.trainer.policy.get_actions_with_value_entropy(
-                    self.buffer.get_step_obs(step),
-                    np.concatenate(self.buffer.masks[step]),
+        observations = self.buffer.get_step_obs(step)
+        masks = self.buffer.masks[step]
+        if self.all_args.value_method == "flow" and self.all_args.flow_entropy_beta:
+            values, entropy_lengths, actions, log_probs = (
+                self.trainer.policy.get_actions_with_value_entropy_length(
+                    observations, masks
                 )
-            value_entropy = _t2n(value_entropy)
+            )
+            entropy_lengths = _to_numpy(entropy_lengths)
         else:
-            value, action, action_log_prob \
-                = self.trainer.policy.get_actions(self.buffer.get_step_obs(step),
-                                                np.concatenate(self.buffer.masks[step]))
-            value_entropy = None
-                
-        values = _t2n(value)
-        actions = _t2n(action)
-        action_log_probs = _t2n(action_log_prob)
-        
-        return values, value_entropy, actions, action_log_probs
+            values, actions, log_probs = self.trainer.policy.get_actions(
+                observations, masks
+            )
+            entropy_lengths = None
+        return (
+            _to_numpy(values),
+            entropy_lengths,
+            _to_numpy(actions),
+            _to_numpy(log_probs),
+        )
 
-    def insert(self, data):
-        obs, rewards, dones, infos, \
-        values, value_entropy, actions, action_log_probs  = data
-
-        dones_env = np.all(dones, axis=1)
-
-        masks = np.ones((self.n_rollout_threads, 1), dtype=np.float32)
-        masks[dones_env == True] = np.zeros(((dones_env == True).sum(), 1), dtype=np.float32)
-
-        active_masks = np.ones((self.n_rollout_threads, 1), dtype=np.float32)
-        active_masks[dones.reshape(-1) == True] = np.zeros(((dones == True).sum(), 1), dtype=np.float32)
-        active_masks[dones_env == True] = np.ones(((dones_env == True).sum(), 1), dtype=np.float32)
-
+    def insert(
+        self,
+        *,
+        obs,
+        transition_next_obs,
+        rewards,
+        dones,
+        terminated,
+        values,
+        entropy_lengths,
+        actions,
+        log_probs,
+    ):
+        trace_masks = np.ones((self.n_rollout_threads, 1), dtype=np.float32)
+        trace_masks[dones[:, 0]] = 0.0
+        bootstrap_masks = np.ones_like(trace_masks)
+        bootstrap_masks[terminated[:, 0]] = 0.0
         self.buffer.insert(
             obs,
             actions,
-            action_log_probs,
+            log_probs,
             values,
             rewards,
-            masks,
-            active_masks=active_masks,
-            value_entropy=value_entropy,
+            trace_masks,
+            active_masks=np.ones_like(trace_masks),
+            value_entropy_length=entropy_lengths,
+            transition_next_obs=transition_next_obs,
+            bootstrap_masks=bootstrap_masks,
         )
-
-    def log_train(self, train_infos, total_num_steps):
-        train_infos["average_step_rewards"] = np.mean(self.buffer.rewards)
-        print("average_step_rewards is {}.".format(train_infos["average_step_rewards"]))
-        for k, v in train_infos.items():
-            if self.use_wandb:
-                wandb.log({k: v}, step=total_num_steps)
-            else:
-                self.writter.add_scalars(k, {k: v}, total_num_steps)
 
     @torch.no_grad()
     def eval(self, total_num_steps):
-        eval_episode = 0
-        eval_episode_rewards = []
-        one_episode_rewards = [0 for _ in range(self.all_args.n_eval_rollout_threads)]
+        self.trainer.prep_rollout()
+        observations = self.eval_envs.reset()
+        num_envs = self.all_args.n_eval_rollout_threads
+        masks = np.ones((num_envs, 1), dtype=np.float32)
+        running_rewards = np.zeros(num_envs, dtype=np.float32)
+        episode_rewards = []
 
-        eval_obs = self.eval_envs.reset()
-        eval_masks = np.ones((self.all_args.n_eval_rollout_threads, 1), dtype=np.float32)
-        
-        all_frames = []
-
-        while True:
-            self.trainer.prep_rollout()
-            eval_actions = \
-                self.trainer.policy.act(eval_obs,
-                                        eval_masks)
-            eval_actions = _t2n(eval_actions)
-
-            # Obser reward and next obs
-            eval_obs, eval_rewards, eval_terminated, eval_truncated, eval_infos = self.eval_envs.step(eval_actions)
-
-            # print('eval_obs=', eval_obs)
-            if self.all_args.use_render:
+        while len(episode_rewards) < self.all_args.eval_episodes:
+            actions = _to_numpy(
+                self.trainer.policy.act(observations, masks, deterministic=True)
+            )
+            observations, rewards, terminated, truncated, _ = self.eval_envs.step(
+                actions
+            )
+            rewards = np.asarray(rewards).reshape(num_envs, -1).mean(axis=1)
+            dones = np.logical_or(terminated, truncated).reshape(num_envs, -1).all(axis=1)
+            running_rewards += rewards
+            masks.fill(1.0)
+            masks[dones] = 0.0
+            for env_index in np.flatnonzero(dones):
+                episode_rewards.append(running_rewards[env_index])
+                running_rewards[env_index] = 0.0
+                if len(episode_rewards) >= self.all_args.eval_episodes:
+                    break
+            if self.use_render:
                 self.eval_envs.render()
 
-            eval_rewards = eval_rewards.reshape(-1, 1)
-            eval_dones = eval_terminated or eval_truncated
-            eval_dones = eval_dones.reshape(-1,1)
-            eval_rewards = np.mean(eval_rewards, axis=1).flatten()
-            one_episode_rewards += eval_rewards
-
-            eval_dones_env = np.all(eval_dones, axis=1)
-            eval_masks = np.ones((self.all_args.n_eval_rollout_threads, 1), dtype=np.float32)
-            eval_masks[eval_dones_env == True] = np.zeros(((eval_dones_env == True).sum(), 1),
-                                                          dtype=np.float32)
-
-            for eval_i in range(self.all_args.n_eval_rollout_threads):
-                if eval_dones_env[eval_i]:
-                    eval_episode += 1
-                    eval_episode_rewards.append(one_episode_rewards[eval_i])
-                    one_episode_rewards[eval_i] = 0
-
-            if eval_episode >= self.all_args.eval_episodes:
-                key_average = 'eval_average_episode_rewards'
-                key_max = 'eval_max_episode_rewards'
-                eval_env_infos = {key_average: eval_episode_rewards,
-                                  key_max: [np.max(eval_episode_rewards)]}
-
-                self.log_env(eval_env_infos, total_num_steps)
-                print("eval_average_episode_rewards is {}."
-                      .format(np.mean(eval_episode_rewards)))
-                
-                if self.use_wandb:
-                        wandb.log({"eval_average_episode_rewards": np.mean(eval_episode_rewards)}, step=total_num_steps)
-                
-                if self.reward_list is None:
-                    self.reward_list = np.array(np.mean(eval_episode_rewards))
-                else:
-                    self.reward_list = np.hstack((self.reward_list, np.array(np.mean(eval_episode_rewards))))
-
-                np.save(self.plt_name+'_eval.npy', self.reward_list)
-        
-                break
-            
-        # Save video
-        '''if len(frames) > 0:
-            #video_dir = os.path.join(self.run_dir, 'videos')
-            video_dir = os.path.join('/home/shahils/Desktop/marl_ws/Multi-Agent-Transformer_old/mat/scripts/videos')
-            os.makedirs(video_dir, exist_ok=True)
-            video_path = os.path.join(video_dir, f'step_{total_num_steps}.mp4')
-            imageio.mimsave(video_path, all_frames, fps=30)'''
+        self.log_scalar(
+            "eval_average_episode_rewards",
+            float(np.mean(episode_rewards)),
+            total_num_steps,
+        )

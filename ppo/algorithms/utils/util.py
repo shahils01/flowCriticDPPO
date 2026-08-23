@@ -16,5 +16,5 @@ def get_clones(module, N):
 def check(input):
     if isinstance(input, dict):
         return {k: check(v) for k, v in input.items()}
-    output = torch.from_numpy(input) if type(input) == np.ndarray else input
+    output = torch.from_numpy(input) if isinstance(input, np.ndarray) else input
     return output

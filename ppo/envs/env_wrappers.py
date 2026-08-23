@@ -2,7 +2,6 @@
 Modified from OpenAI Baselines code to work with multi-agent envs
 """
 import numpy as np
-import torch
 from multiprocessing import Process, Pipe
 from abc import ABC, abstractmethod
 from ppo.utils.util import tile_images
@@ -138,10 +137,7 @@ class ShareVecEnv(ABC):
 
     @property
     def unwrapped(self):
-        if isinstance(self, VecEnvWrapper):
-            return self.venv.unwrapped
-        else:
-            return self
+        return self
 
     def get_viewer(self):
         if self.viewer is None:
@@ -157,12 +153,17 @@ def worker(remote, parent_remote, env_fn_wrapper):
         cmd, data = remote.recv()
         if cmd == 'step':
             ob, reward, terminated, truncated, info = env.step(data)
-            done = terminated or truncated
+            done = np.logical_or(terminated, truncated)
+            terminal_observation = ob
             if 'bool' in done.__class__.__name__:
                 if done:
+                    info = dict(info)
+                    info["terminal_observation"] = terminal_observation
                     ob, _ = env.reset()
             else:
                 if np.all(done):
+                    info = dict(info)
+                    info["terminal_observation"] = terminal_observation
                     ob, _ = env.reset()
 
             remote.send((ob, reward, done, info))
@@ -244,11 +245,6 @@ class SubprocVecEnv(ShareVecEnv):
             p.join()
         self.closed = True
 
-    def get_images(self):
-        for remote in self.remotes:
-            remote.send(('render', "rgb_array"))
-        return [remote.recv() for remote in self.remotes]
-
     def render(self, mode="rgb_array"):
         for remote in self.remotes:
             remote.send(('render', mode))
@@ -265,7 +261,6 @@ class SubprocVecEnv(ShareVecEnv):
 def shareworker(remote, parent_remote, env_fn_wrapper):
     parent_remote.close()
     env = env_fn_wrapper.x()
-    noise_scale = 0.1
     while True:
         cmd, data = remote.recv()
         if cmd == 'step':
@@ -273,12 +268,17 @@ def shareworker(remote, parent_remote, env_fn_wrapper):
             # Adding noise into the observation
             # noise = np.random.normal(0, noise_scale, size=ob.shape)
             # ob += noise
-            done = terminated or truncated
+            done = np.logical_or(terminated, truncated)
+            terminal_observation = ob
             if 'bool' in done.__class__.__name__:
                 if done:
+                    info = dict(info)
+                    info["terminal_observation"] = terminal_observation
                     ob, _ = env.reset()
             else:
                 if np.all(done):
+                    info = dict(info)
+                    info["terminal_observation"] = terminal_observation
                     ob, _ = env.reset()
 
             remote.send((ob, reward, terminated, truncated, info))   
@@ -563,15 +563,27 @@ class ShareDummyVecEnv(ShareVecEnv):
         truncated = np.array(truncated)
         infos = np.array(infos)
 
-        dones = terminated or truncated
+        dones = np.logical_or(terminated, truncated)
 
         for (i, done) in enumerate(dones):
             if 'bool' in done.__class__.__name__:
                 if done:
+                    infos[i] = dict(infos[i])
+                    infos[i]["terminal_observation"] = (
+                        {key: value[i].copy() for key, value in obs.items()}
+                        if isinstance(obs, dict)
+                        else obs[i].copy()
+                    )
                     new_obs, _ = self.envs[i].reset()
                     _assign_obs(obs, i, new_obs)
             else:
                 if np.all(done):
+                    infos[i] = dict(infos[i])
+                    infos[i]["terminal_observation"] = (
+                        {key: value[i].copy() for key, value in obs.items()}
+                        if isinstance(obs, dict)
+                        else obs[i].copy()
+                    )
                     new_obs, _ = self.envs[i].reset()
                     _assign_obs(obs, i, new_obs)
         self.actions = None

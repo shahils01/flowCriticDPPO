@@ -1,10 +1,9 @@
 import numpy as np
 import math
 import torch
-from typing import Any, ClassVar, Dict, Optional, Type, TypeVar, Union
 
 def check(input):
-    if type(input) == np.ndarray:
+    if isinstance(input, np.ndarray):
         return torch.from_numpy(input)
     if isinstance(input, dict):
         return {k: check(v) for k, v in input.items()}
@@ -24,9 +23,12 @@ def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
         param_group['lr'] = lr
 
 def huber_loss(e, d):
-    a = (abs(e) <= d).float()
-    b = (e > d).float()
-    return a*e**2/2 + b*d*(abs(e)-d/2)
+    absolute_error = e.abs()
+    return torch.where(
+        absolute_error <= d,
+        0.5 * e.pow(2),
+        d * (absolute_error - 0.5 * d),
+    )
 
 def mse_loss(e):
     return e**2/2

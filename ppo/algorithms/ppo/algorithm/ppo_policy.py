@@ -1,78 +1,59 @@
+"""Policy wrapper for the clean three-method PPO implementation."""
+
 import torch
-import torch.nn as nn  # Already likely imported, but ensure it exists
-from torch.nn.parallel import DataParallel  # Explicit import for clarity
-import numpy as np
-from ppo.utils.util import get_shape_from_obs_space, get_shape_from_act_space
-from ppo.algorithms.utils.util import check
+
 from ppo.algorithms.ppo.algorithm.PPO import PPO
+from ppo.algorithms.utils.util import check
+from ppo.utils.util import get_shape_from_act_space, get_shape_from_obs_space
+
 
 class PPO_Policy:
-    """
-    PPO Policy  class. Wraps actor and critic networks to compute actions and value function predictions.
-
-    :param args: (argparse.Namespace) arguments containing relevant model and policy information.
-    :param obs_space: (gym.Space) observation space.
-    :param cent_obs_space: (gym.Space) value function input space (centralized input for MAPPO, decentralized for IPPO).
-    :param action_space: (gym.Space) action space.
-    :param device: (torch.device) specifies the device to run on (cpu/gpu).
-    """
-
-    def __init__(self, args, obs_space, act_space, device=torch.device("cpu"), num_quants=1):
+    def __init__(self, args, obs_space, act_space, device=torch.device("cpu")):
         self.device = device
-        self.algorithm_name = args.algorithm_name
         self.lr = args.lr
         self.critic_lr = getattr(args, "critic_lr", args.lr)
         self.opti_eps = args.opti_eps
         self.weight_decay = args.weight_decay
         self._use_policy_active_masks = args.use_policy_active_masks
-        self.n_embd = args.n_embd
-        
-        if act_space.__class__.__name__ == 'Box':
-            self.action_type = 'Continuous'
-        else:
-            self.action_type = 'Discrete'
+        self.value_method = args.value_method
+        requested_particles = args.num_value_particles
+        self.num_value_particles = (
+            1 if self.value_method == "scalar" else requested_particles
+        )
 
+        self.action_type = (
+            "Continuous" if act_space.__class__.__name__ == "Box" else "Discrete"
+        )
         self.obs_shape = get_shape_from_obs_space(obs_space)
         if isinstance(self.obs_shape, dict):
-            self.obs_dim = None
-        else:
-            self.obs_dim = self.obs_shape[0] if len(self.obs_shape) == 1 else None
+            raise ValueError("Dictionary observations are not supported by this PPO network")
+        self.obs_dim = self.obs_shape[0] if len(self.obs_shape) == 1 else None
+        if self.obs_dim is None:
+            raise ValueError(f"Expected a vector observation space, received {self.obs_shape}")
 
-        self.act_dim = get_shape_from_act_space(act_space)
+        self.act_dim = (
+            act_space.n
+            if self.action_type == "Discrete"
+            else get_shape_from_act_space(act_space)
+        )
+        self.action_output_dim = 1 if self.action_type == "Discrete" else self.act_dim
+        self.tensor_kwargs = dict(dtype=torch.float32, device=device)
 
-        if self.action_type == 'Discrete':
-            # self.act_dim = act_space.n
-            self.act_num = 1
-        else:
-            # self.act_dim = act_space.shape[0]
-            self.act_num = self.act_dim
-
-        self.tpdv = dict(dtype=torch.float32, device=device)
-        
-        self.obs_dim_ = self.obs_dim
-        self.num_quants = num_quants
-        self.critic_type = getattr(args, "critic_type", "direct")
-        self.policy_type = getattr(args, "policy_type", "gaussian")
-        self.action_log_num = 1 if self.policy_type == "flow" else self.act_num
-
-        self.transformer = PPO(self.obs_dim, 
-                               self.act_dim,
-                               n_embd=args.n_embd,
-                               device=device,
-                               action_type=self.action_type,
-                               num_quants=num_quants,
-                               critic_type=self.critic_type,
-                               num_flow_steps=getattr(args, "num_flow_steps", 8),
-                               flow_integrator=getattr(args, "flow_integrator", "euler"),
-                               flow_particle_scale=getattr(args, "flow_particle_scale", 0.05),
-                               flow_max_particle_scale=getattr(args, "flow_max_particle_scale", 2.0),
-                               flow_max_velocity=getattr(args, "flow_max_velocity", 5.0),
-                               flow_time_embed_dim=getattr(args, "flow_time_embed_dim", 64),
-                               policy_type=self.policy_type,
-                               flow_policy_max_velocity=getattr(args, "flow_policy_max_velocity", 5.0),
-                               flow_policy_base_std=getattr(args, "flow_policy_base_std", 0.35),
-                               flow_policy_loss_samples=getattr(args, "flow_policy_loss_samples", 8),
-                               flow_policy_output_scale=getattr(args, "flow_policy_output_scale", 0.25))
+        self.transformer = PPO(
+            self.obs_dim,
+            self.act_dim,
+            n_embd=args.n_embd,
+            device=device,
+            action_type=self.action_type,
+            value_method=self.value_method,
+            num_value_particles=requested_particles,
+            num_flow_steps=args.num_flow_steps,
+            flow_integrator=args.flow_integrator,
+            flow_particle_scale=args.flow_particle_scale,
+            flow_max_velocity=args.flow_max_velocity,
+            flow_time_embed_dim=args.flow_time_embed_dim,
+            flow_entropy_eps=args.flow_entropy_eps,
+        )
 
         self.optimizer = torch.optim.Adam(
             [
@@ -92,162 +73,101 @@ class PPO_Policy:
         )
 
     def lr_decay(self, episode, episodes):
-        """
-        Decay the actor and critic learning rates.
-        :param episode: (int) current training episode.
-        :param episodes: (int) total number of training episodes.
-        """
-        frac = 1.0 - (episode / float(episodes))
-        for param_group in self.optimizer.param_groups:
-            param_group["lr"] = param_group["initial_lr"] * frac
+        fraction = 1.0 - episode / float(episodes)
+        for group in self.optimizer.param_groups:
+            group["lr"] = group["initial_lr"] * fraction
 
-    def get_actions(self, obs, masks):
-        """
-        Compute actions and value function predictions for the given inputs.
-        :param cent_obs (np.ndarray): centralized input to the critic.
-        :param obs (np.ndarray): local agent inputs to the actor.
-        :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.
-        :param rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
-        :param masks: (np.ndarray) denotes points at which RNN states should be reset.
-        :param available_actions: (np.ndarray) denotes which actions are available to agent
-                                  (if None, all actions available)
-        :param deterministic: (bool) whether the action should be mode of distribution or should be sampled.
+    def _reshape_obs(self, observations):
+        return observations.reshape(-1, *self.obs_shape)
 
-        :return values: (torch.Tensor) value function predictions.
-        :return actions: (torch.Tensor) actions to take.
-        :return action_log_probs: (torch.Tensor) log probabilities of chosen actions.
-        :return rnn_states_actor: (torch.Tensor) updated actor network RNN states.
-        :return rnn_states_critic: (torch.Tensor) updated critic network RNN states.
-        """
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
+    def get_actions(self, observations, masks):
+        actions, action_log_probs, values = self.transformer.get_actions(
+            self._reshape_obs(observations)
+        )
+        return (
+            values.view(-1, self.num_value_particles),
+            actions.view(-1, self.action_output_dim),
+            action_log_probs.view(-1, 1),
+        )
 
-        actions, action_log_probs, values = self.transformer.get_actions(obs)
-        actions = actions.view(-1, self.act_num)        
-        action_log_probs = action_log_probs.view(-1, self.action_log_num)
-        values = values.view(-1, self.num_quants)
-    
-        return values, actions, action_log_probs
+    def get_actions_with_value_entropy_length(self, observations, masks):
+        if self.value_method != "flow":
+            raise RuntimeError("Entropy length is only available for value_method='flow'")
+        observations = self._reshape_obs(observations)
+        actions, action_log_probs, values = self.transformer.get_actions(observations)
+        _, entropy_length = self.transformer.get_values_and_entropy_length(observations)
+        return (
+            values.view(-1, self.num_value_particles),
+            entropy_length.view(-1, 1),
+            actions.view(-1, self.action_output_dim),
+            action_log_probs.view(-1, 1),
+        )
 
-    def get_actions_with_value_entropy(self, obs, masks):
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
+    def get_values(self, observations, masks):
+        values = self.transformer.get_values(self._reshape_obs(observations))
+        return values.view(-1, self.num_value_particles)
 
-        actions, action_log_probs, values = self.transformer.get_actions(obs)
-        _, value_entropy = self.transformer.get_values_and_entropy(obs)
-        actions = actions.view(-1, self.act_num)
-        action_log_probs = action_log_probs.view(-1, self.action_log_num)
-        values = values.view(-1, self.num_quants)
-        value_entropy = value_entropy.view(-1, 1)
+    def get_target_values(self, observations, masks=None):
+        if self.value_method == "scalar":
+            raise RuntimeError("Scalar PPO does not use a target critic")
+        values = self.transformer.get_values(
+            self._reshape_obs(observations), use_target=True
+        )
+        return values.view(-1, self.num_value_particles)
 
-        return values, value_entropy, actions, action_log_probs
+    def get_target_values_and_entropy_length(self, observations, masks=None):
+        if self.value_method != "flow":
+            raise RuntimeError("Entropy length is only available for value_method='flow'")
+        values, entropy_length = self.transformer.get_values_and_entropy_length(
+            self._reshape_obs(observations), use_target=True
+        )
+        return (
+            values.view(-1, self.num_value_particles),
+            entropy_length.view(-1, 1),
+        )
 
-    def get_values(self, obs, masks):
-        """
-        Get value function predictions.
-        :param cent_obs (np.ndarray): centralized input to the critic.
-        :param rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
-        :param masks: (np.ndarray) denotes points at which RNN states should be reset.
-
-        :return values: (torch.Tensor) value function predictions.
-        """
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
-
-        values = self.transformer.get_values(obs)
-        values = values.view(-1, self.num_quants)
-
-        return values
-
-    def get_values_and_entropy(self, obs, masks):
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
-
-        values, value_entropy = self.transformer.get_values_and_entropy(obs)
-        values = values.view(-1, self.num_quants)
-        value_entropy = value_entropy.view(-1, 1)
-
-        return values, value_entropy
-
-    def evaluate_actions(self, obs, actions, masks, active_masks=None):
-        """
-        Get action logprobs / entropy and value function predictions for actor update.
-        :param cent_obs (np.ndarray): centralized input to the critic.
-        :param obs (np.ndarray): local agent inputs to the actor.
-        :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.
-        :param rnn_states_critic: (np.ndarray) if critic is RNN, RNN states for critic.
-        :param actions: (np.ndarray) actions whose log probabilites and entropy to compute.
-        :param masks: (np.ndarray) denotes points at which RNN states should be reset.
-        :param available_actions: (np.ndarray) denotes which actions are available to agent
-                                  (if None, all actions available)
-        :param active_masks: (torch.Tensor) denotes whether an agent is active or dead.
-
-        :return values: (torch.Tensor) value function predictions.
-        :return action_log_probs: (torch.Tensor) log probabilities of the input actions.
-        :return dist_entropy: (torch.Tensor) action distribution entropy for the given inputs.
-        """
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
-        actions = actions.reshape(-1, self.act_num)
-
-        action_log_probs, values, entropy, gate_entropy = self.transformer(obs, actions)
-
-        action_log_probs = action_log_probs.view(-1, self.action_log_num)
-        values = values.view(-1, self.num_quants)
-        entropy = entropy.view(-1, self.action_log_num)
+    def evaluate_actions(self, observations, actions, masks, active_masks=None):
+        observations = self._reshape_obs(observations)
+        actions = actions.reshape(-1, self.action_output_dim)
+        compute_values = self.value_method != "flow"
+        action_log_probs, values, entropy = self.transformer.evaluate_actions(
+            observations, actions, compute_values=compute_values
+        )
+        action_log_probs = action_log_probs.view(-1, 1)
+        if values is not None:
+            values = values.view(-1, self.num_value_particles)
+        entropy = entropy.view(-1, 1)
 
         if self._use_policy_active_masks and active_masks is not None:
-            entropy = (entropy*active_masks).sum()/active_masks.sum()
+            entropy = (entropy * active_masks).sum() / active_masks.sum().clamp_min(1.0)
         else:
             entropy = entropy.mean()
+        return values, action_log_probs, entropy
 
-        if gate_entropy is not None:
-            return values, action_log_probs, entropy, gate_entropy.mean()
-        else:
-            return values, action_log_probs, entropy, gate_entropy
+    def critic_flow_matching_loss(self, observations, target_particles):
+        observations = check(self._reshape_obs(observations)).to(**self.tensor_kwargs)
+        return self.transformer.critic_flow_matching_loss(
+            observations, target_particles
+        )
 
-    def critic_flow_matching_loss(self, obs, returns):
-        if isinstance(self.obs_shape, dict):
-            obs = {k: obs[k].reshape(-1, *self.obs_shape[k]) for k in self.obs_shape.keys()}
-            obs = {k: check(v).to(**self.tpdv) for k, v in obs.items()}
-        else:
-            obs = obs.reshape(-1, *self.obs_shape)
-            obs = check(obs).to(**self.tpdv)
-        return self.transformer.critic_flow_matching_loss(obs, returns)
+    def update_target_critic(self, tau):
+        self.transformer.update_target_critic(tau)
 
-    def act(self, obs, masks):
-        """
-        Compute actions using the given inputs.
-        :param obs (np.ndarray): local agent inputs to the actor.
-        :param rnn_states_actor: (np.ndarray) if actor is RNN, RNN states for actor.
-        :param masks: (np.ndarray) denotes points at which RNN states should be reset.
-        :param available_actions: (np.ndarray) denotes which actions are available to agent
-                                  (if None, all actions available)
-        :param deterministic: (bool) whether the action should be mode of distribution or should be sampled.
-        """
-
-        # this function is just a wrapper for compatibility
-        _, actions, _ = self.get_actions(obs, masks)
-
-        return actions
+    def act(self, observations, masks, deterministic=True):
+        actions = self.transformer.act(
+            self._reshape_obs(observations), deterministic=deterministic
+        )
+        return actions.view(-1, self.action_output_dim)
 
     def save(self, save_dir, episode):
-        torch.save(self.transformer.state_dict(), str(save_dir) + "/transformer_" + str(episode) + ".pt")
+        torch.save(
+            self.transformer.state_dict(),
+            str(save_dir) + "/transformer_" + str(episode) + ".pt",
+        )
 
     def restore(self, model_dir):
-        transformer_state_dict = torch.load(model_dir)
-        self.transformer.load_state_dict(transformer_state_dict)
-        # self.transformer.reset_std()
+        state_dict = torch.load(model_dir, map_location=self.device)
+        self.transformer.load_state_dict(state_dict)
 
     def train(self):
         self.transformer.train()
