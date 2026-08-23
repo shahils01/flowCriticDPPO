@@ -13,21 +13,21 @@ python train/train_mujoco.py \
  --scenario ${scenario} \
  --use_value_entropy \
  --true_integration \
- --critic_lr 3e-4 \
- --lr 3e-4 \
- --entropy_coef 0.001 \
+ --critic_lr 1e-4 \
+ --lr 1e-4 \
+ --entropy_coef 0.01 \
  --gamma 0.99 \
  --gae_lambda 0.95 \
  --max_grad_norm 1.0 \
  --eval_episodes 2 \
  --n_training_threads 32 \
- --n_rollout_threads 256 \
+ --n_rollout_threads 64 \
  --num_mini_batch 1 \
- --episode_length 100 \
+ --episode_length 500 \
  --eval_interval 25 \
  --num_env_steps 200000000 \
  --ppo_epoch 20 \
- --clip_param 0.2 \
+ --clip_param 0.1 \
  --use_eval \
  --add_center_xy \
  --use_state_agent \

@@ -52,11 +52,12 @@ class MujocoRunner(Runner):
                 obs, rewards, terminated, truncated, infos = self.envs.step(actions)
                 # self.envs.render()
                 rewards = rewards.reshape(-1, 1)
+                dones = terminated.reshape(-1, 1)
                 terminated = terminated.reshape(-1, 1)
                 truncated = truncated.reshape(-1, 1)
-                dones = np.logical_or(terminated, truncated)
-                                
-                dones_env = np.all(dones, axis=1)
+
+                dones_env = np.logical_or(terminated, truncated)
+                dones_env = np.all(dones_env, axis=1)
                 reward_env = np.mean(rewards).flatten()
                 train_episode_rewards += reward_env
                 for t in range(self.n_rollout_threads):
